@@ -40,7 +40,7 @@ Items
 | R15 | IF the item is not on the menu of the group's resturant. THEN THE SYSTEM SHALL reject the request with error ITEM_NOT_ON_MENU.
 | R16 | WHEN a particpant changes the quantity of, or removes, one of their own items, THE SYSTEM SHALL apply the changes to the item only.
 | R17 | IF a participant tries to change or remove another participant's item, THEN THE SYSTEM SHALL reject the request with error NOT_ALLOWED.
-| R18 | WHEN the host removes any particpant's item, THE SYSTEM SHALL remove that tiem.
+| R18 | WHEN the host removes any particpant's item, THE SYSTEM SHALL remove that time.
 | R19 | WHEN the host removes a participant, THE SYSTEM SHALL remove that participant and all of their items. 
 
 Summary and delivery fee
