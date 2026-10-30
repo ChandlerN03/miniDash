@@ -52,4 +52,6 @@ Prompt | Read AGENTS.md. Create a small food-delivery REST API called MiniDash i
 what the AI produced | It created the standard api setup and paths, it reate the src file, making industry standard seperations and all that. The page itself looks like the standard api page. 
 What I verified | that the page works currectly nothing looks visually off and verified the test of it and it all looked sound. 
 WHat I changed and why | I added teh image component to the resturant and to the food item. 
-OUtcome | commited code and API page made. 
+Outcome | commited code and API page made. 
+
+Entry 5: 
