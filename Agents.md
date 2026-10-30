@@ -1,7 +1,7 @@
 # AGENTS.md (rules for the AI assistant)
 
 - Language: Python 3, FastAPI. Tests: pytest.
-- Layers: routes -> services -> repository. No SQL. No business rules in routes. The memory for this project is going to be a txt file. 
+- Layers: routes -> services -> repository. No SQL. No business rules in routes. The memory for this project is going to be a txt file in JSON format. 
 - Time: never call datetime.now() in rules. Accept an injected clock.
 - Money: integer cents only. Never floats.
 - Do not add dependencies. Do not create files I did not name.
