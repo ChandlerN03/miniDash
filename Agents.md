@@ -7,3 +7,4 @@
 - Do not add dependencies. Do not create files I did not name.
 - Only edit the files listed in the prompt. Tests first, then implementation.
 - Follow docs/requirements.md; if a requirement is unclear, ask instead of guessing.
+- Injected clock, integer cents, no new dependencies, only edit the files I name.
