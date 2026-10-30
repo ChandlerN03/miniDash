@@ -62,4 +62,24 @@ Slice | pay split logic
 Prompt | Read AGENTS.md. I’m implementing Slice 1. The function split_evenly(total_cents, parts) already exists in src/services/fee_split.py, and I wrote it myself. Don’t change it. Write tests in tests/test_fee_split.py for these requirements: R22: each participant gets the delivery fee divided by the number of participants, rounded down to whole cents. R23: leftover cents are given one at a time, starting with the last participant and moving toward the first. R24: the shares always sum to exactly the fee. Required examples: 100 across 3 gives [33, 33, 34]; 101 across 3 gives [33, 34, 34]; 2 across 5 gives [0, 0, 0, 1, 1]; 300 across 3 gives [100, 100, 100]; 499 across 1 gives [499]. Also a loop over many totals and group sizes checking the sum and that shares differ by at most 1 cent; parts below 1 or a negative total raises ValueError. Only edit tests/test_fee_split.py. No new dependencies. If you think my function has a bug, tell me instead of fixing it.
 What I verfied | that the logic for the tests make sense and that it would check the case there is a not even distribution of cost for each person. I also had mutation check to see if it tracks the changes. 
 What I changed and why | for this one I did not change anything I made the algorithm for fee splitting, just had it makes the tests which it is good at doing. 
-Outcome | test for the function and commitment ready code. 
+Outcome | test for the function and commit ready code. 
+
+Entry 6: activity timer
+Field | entry
+Entry # / date | 6
+Tool, model, node | kiro, Sonnect 5.5, Default
+Slice | pay split logic
+Prompt | Read AGENTS.md and src/clock.py. I'm implementing Slice 2. I wrote the class ActivityTimer myself in
+src/services/activity_timer.py. Do not change it. Write tests in tests/test_activity_timer.py for this
+requirement: WHEN any request reaches an OPEN or LOCKED group order whose last activity was 2 hours
+or more ago (exactly 2:00:00 counts), THE SYSTEM SHALL set its status to EXPIRED. The class takes a
+clock object with a now() method, and a ttl that defaults to 2 hours. Test with a fake clock: a new
+timer is not expired; 1:59:59 is not expired; exactly 2:00:00 is expired; 2:00:01 is expired; touch()
+restarts the countdown; a custom ttl works. Add a test that fails if the code calls the real datetime.now()
+instead of the clock. If the interface of src/clock.py differs from what my class expects, tell me instead
+of changing my class. Only edit tests/test_activity_timer.py. No new dependencies. If you think my code
+has a bug, tell me instead of fixing it.
+What I verified | that the logic was sound and did check the different scenarios I was looking at. 
+What I changed | nothing I did the algorithm so it was just tasked to tests
+Outcome | tests for the function and commit ready code. 
+
