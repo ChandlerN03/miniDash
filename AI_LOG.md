@@ -51,7 +51,15 @@ Slice | inital environment setup
 Prompt | Read AGENTS.md. Create a small food-delivery REST API called MiniDash in Python with FastAPI. Store data in a JSON file instead of a database. Data: restaurants (id, name, cuisine, opens_at, closes_at, avg_prep_minutes), menu_items (id, restaurant_id, name, price_cents), orders (id, restaurant_id, status, total_cents, address, created_at), and order items. Endpoints: GET /restaurants, GET /restaurants/{id}/menu, POST /orders, GET /orders/{id}, PATCH /orders/{id}/status. Use a layered structure (routes, services, repository). Seed 3 restaurants with a few menu items each. Add pytest tests for each endpoint using a temporary data file, and a README with run instructions. No authentication. Don’t add any dependency beyond fastapi, uvicorn, and pytest without telling me why.
 what the AI produced | It created the standard api setup and paths, it reate the src file, making industry standard seperations and all that. The page itself looks like the standard api page. 
 What I verified | that the page works currectly nothing looks visually off and verified the test of it and it all looked sound. 
-WHat I changed and why | I added teh image component to the resturant and to the food item. 
+WHat I changed and why | I added the image component to the resturant and to the food item. 
 Outcome | commited code and API page made. 
 
-Entry 5: 
+Entry 5: fee-split 
+Field | Entry
+Entry # / date | 5
+Tool, model, mode | Kiro, Sonnet 5.5 , Default
+Slice | pay split logic
+Prompt | Read AGENTS.md. I’m implementing Slice 1. The function split_evenly(total_cents, parts) already exists in src/services/fee_split.py, and I wrote it myself. Don’t change it. Write tests in tests/test_fee_split.py for these requirements: R22: each participant gets the delivery fee divided by the number of participants, rounded down to whole cents. R23: leftover cents are given one at a time, starting with the last participant and moving toward the first. R24: the shares always sum to exactly the fee. Required examples: 100 across 3 gives [33, 33, 34]; 101 across 3 gives [33, 34, 34]; 2 across 5 gives [0, 0, 0, 1, 1]; 300 across 3 gives [100, 100, 100]; 499 across 1 gives [499]. Also a loop over many totals and group sizes checking the sum and that shares differ by at most 1 cent; parts below 1 or a negative total raises ValueError. Only edit tests/test_fee_split.py. No new dependencies. If you think my function has a bug, tell me instead of fixing it.
+What I verfied | that the logic for the tests make sense and that it would check the case there is a not even distribution of cost for each person. I also had mutation check to see if it tracks the changes. 
+What I changed and why | for this one I did not change anything I made the algorithm for fee splitting, just had it makes the tests which it is good at doing. 
+Outcome | test for the function and commitment ready code. 
