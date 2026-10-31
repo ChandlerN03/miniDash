@@ -5,3 +5,15 @@ class MiniDashError(Exception):
         super().__init__(message)
         self.code = code
         self.message = message
+
+
+# Error codes used by group orders. Each constant equals its own name, so the
+# string a client sees is the same as the name used in the code.
+RESTAURANT_NOT_FOUND = "RESTAURANT_NOT_FOUND"
+INVALID_SESSION = "INVALID_SESSION"
+INVALID_CODE = "INVALID_CODE"
+ORDER_EXPIRED = "ORDER_EXPIRED"
+ORDER_CHECKED_OUT = "ORDER_CHECKED_OUT"
+ORDER_LOCKED = "ORDER_LOCKED"
+ALREADY_JOINED = "ALREADY_JOINED"
+GROUP_FULL = "GROUP_FULL"

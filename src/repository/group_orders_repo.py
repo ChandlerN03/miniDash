@@ -1,4 +1,8 @@
+from typing import Callable, TypeVar
+
 from src.store.file_store import FileStore
+
+T = TypeVar("T")
 
 # Every group order dict must have these fields. "code" is the share code and
 # is also the key the group is stored under. "created_at" is the date and time
@@ -59,6 +63,28 @@ class GroupOrderRepository:
 
     def get_group_order(self, code: str) -> dict | None:
         return self._store.read()["group_orders"].get(code)
+
+    def update_group_order(self, code: str, change: Callable[[dict], T]) -> T:
+        """Change a stored group order in one step, so simultaneous requests cannot overwrite each other.
+
+        The group is loaded, `change(group)` is called with it, and the result
+        is saved, all while the store's lock is held. Whatever `change` returns
+        is returned to the caller.
+
+        - `change` may modify the group in place. Return a value, such as a
+          problem to report, if the change must be kept even though the request
+          is rejected.
+        - If `change` raises, nothing is saved and the exception propagates.
+        - Raises GroupOrderNotFoundError (without calling `change`) for an
+          unknown code, and ValueError if the changed group is missing a field.
+        """
+        with self._store.transaction() as data:
+            group = data["group_orders"].get(code)
+            if group is None:
+                raise GroupOrderNotFoundError(f"No group order with share code {code!r}.")
+            result = change(group)
+            _check_fields(group)
+            return result
 
     def save_group_order(self, group: dict) -> None:
         """Replace an existing group order. Raises GroupOrderNotFoundError for an unknown code."""

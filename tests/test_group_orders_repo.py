@@ -1,5 +1,7 @@
 import copy
 import json
+import threading
+import time
 from datetime import datetime
 
 import pytest
@@ -490,3 +492,157 @@ def test_a_crash_while_writing_leaves_the_real_file_unchanged(repo, data_file, c
     assert read_file(data_file)["group_orders"].keys() == {"aaaaaa"}
     assert list(data_file.parent.glob(".minidash-*.tmp")) == []
     assert repo.get_group_order("bbbbbb") is None
+
+
+# ------------------------------------------------- update_group_order (atomic change)
+
+
+def test_update_applies_the_change_and_stores_it(repo, clock):
+    repo.create_group_order(make_group(clock))
+
+    def lock(group):
+        group["status"] = "LOCKED"
+
+    repo.update_group_order("Ab3dEf", lock)
+
+    assert repo.get_group_order("Ab3dEf")["status"] == "LOCKED"
+
+
+def test_update_returns_what_the_change_function_returns(repo, clock):
+    repo.create_group_order(make_group(clock))
+
+    result = repo.update_group_order("Ab3dEf", lambda group: len(group["participants"]))
+
+    assert result == 1
+
+
+def test_update_gives_the_change_function_the_stored_group(repo, clock):
+    group = make_group(clock)
+    repo.create_group_order(group)
+    seen = []
+
+    repo.update_group_order("Ab3dEf", lambda stored: seen.append(copy.deepcopy(stored)))
+
+    assert seen == [group]
+
+
+def test_update_keeps_participant_join_order(repo, clock):
+    repo.create_group_order(make_group(clock, participants=[participant(1, "Zed", clock)]))
+
+    repo.update_group_order("Ab3dEf", lambda g: g["participants"].append(participant(2, "Amy", clock)))
+    repo.update_group_order("Ab3dEf", lambda g: g["participants"].append(participant(3, "Abe", clock)))
+
+    names = [p["display_name"] for p in repo.get_group_order("Ab3dEf")["participants"]]
+    assert names == ["Zed", "Amy", "Abe"]
+
+
+def test_update_leaves_other_groups_unchanged(repo, clock):
+    repo.create_group_order(make_group(clock, code="aaaaaa", id=1))
+    other = make_group(clock, code="bbbbbb", id=2)
+    repo.create_group_order(other)
+
+    repo.update_group_order("aaaaaa", lambda g: g.update(status="LOCKED"))
+
+    assert repo.get_group_order("bbbbbb") == other
+
+
+def test_update_survives_reopening_the_file(data_file, clock):
+    open_repo(data_file).create_group_order(make_group(clock))
+
+    open_repo(data_file).update_group_order("Ab3dEf", lambda g: g.update(status="LOCKED"))
+
+    assert open_repo(data_file).get_group_order("Ab3dEf")["status"] == "LOCKED"
+
+
+def test_update_unknown_code_raises_and_never_calls_the_change_function(repo):
+    calls = []
+
+    with pytest.raises(GroupOrderNotFoundError):
+        repo.update_group_order("nope42", lambda group: calls.append(group))
+
+    assert calls == []
+    assert repo.get_group_order("nope42") is None
+
+
+def test_update_stores_nothing_when_the_change_function_raises(repo, data_file, clock):
+    repo.create_group_order(make_group(clock))
+    before = data_file.read_text()
+
+    def half_done(group):
+        group["status"] = "LOCKED"  # changed, then fails
+        raise RuntimeError("boom")
+
+    with pytest.raises(RuntimeError, match="boom"):
+        repo.update_group_order("Ab3dEf", half_done)
+
+    assert data_file.read_text() == before
+    assert repo.get_group_order("Ab3dEf")["status"] == "OPEN"
+
+
+def test_update_rejects_a_change_that_removes_a_required_field(repo, data_file, clock):
+    repo.create_group_order(make_group(clock))
+    before = data_file.read_text()
+
+    with pytest.raises(ValueError, match="created_at"):
+        repo.update_group_order("Ab3dEf", lambda group: group.pop("created_at"))
+
+    assert data_file.read_text() == before
+
+
+def test_update_can_keep_a_change_and_report_a_problem_to_the_caller(repo, clock):
+    """The change function returns a problem instead of raising, so its change is saved."""
+    repo.create_group_order(make_group(clock))
+
+    def expire_and_report(group):
+        group["status"] = "EXPIRED"
+        return "ORDER_EXPIRED"
+
+    assert repo.update_group_order("Ab3dEf", expire_and_report) == "ORDER_EXPIRED"
+    assert repo.get_group_order("Ab3dEf")["status"] == "EXPIRED"
+
+
+def test_simultaneous_updates_are_not_lost(repo, clock):
+    repo.create_group_order(make_group(clock, participants=[participant(1, "Host", clock)]))
+    total = 20
+    barrier = threading.Barrier(total)
+
+    def add_participant(number):
+        def change(group):
+            time.sleep(0.002)  # widens the window in which a lost update could happen
+            group["participants"].append(participant(number, f"P{number}", clock))
+
+        barrier.wait()
+        repo.update_group_order("Ab3dEf", change)
+
+    threads = [threading.Thread(target=add_participant, args=(n,)) for n in range(2, total + 2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    ids = sorted(p["participant_id"] for p in repo.get_group_order("Ab3dEf")["participants"])
+    assert ids == [1] + list(range(2, total + 2))
+
+
+def test_each_simultaneous_update_sees_the_previous_one(repo, clock):
+    repo.create_group_order(make_group(clock, participants=[participant(1, "Host", clock)]))
+    total = 15
+    barrier = threading.Barrier(total)
+    seen_sizes = []
+
+    def add_participant(number):
+        def change(group):
+            seen_sizes.append(len(group["participants"]))
+            time.sleep(0.001)
+            group["participants"].append(participant(number, f"P{number}", clock))
+
+        barrier.wait()
+        repo.update_group_order("Ab3dEf", change)
+
+    threads = [threading.Thread(target=add_participant, args=(n,)) for n in range(2, total + 2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert sorted(seen_sizes) == list(range(1, total + 1))  # each saw a different, growing size
