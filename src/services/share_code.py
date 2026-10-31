@@ -3,7 +3,7 @@ import string
 from typing import Collection, Protocol
 
 CODE_LENGTH = 6
-MAX_ATTEMPTS = 125
+MAX_ATTEMPTS = 100
 
 # A-Z, a-z and 0-9 without the look-alike characters 0, O, 1, I and l (57 left).
 AMBIGUOUS = "0O1Il"

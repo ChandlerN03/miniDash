@@ -124,4 +124,7 @@ SEED_DATA = {
     ],
     "orders": [],
     "order_items": [],
+    # Group orders: sessions are keyed by token, group_orders by share code.
+    "sessions": {},
+    "group_orders": {},
 }

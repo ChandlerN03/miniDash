@@ -19,10 +19,22 @@ class FileStore:
         self._lock = threading.RLock()
 
     def initialize(self, seed: dict) -> None:
-        """Write the seed data if the file is missing or empty."""
+        """Make sure the file has every collection in `seed`.
+
+        A missing or empty file is filled with the whole seed. If the file
+        already has data, only collections that are missing from it are added
+        (this is how an older file gets "sessions" and "group_orders"). Existing
+        collections are never changed.
+        """
         with self._lock:
             if not self._path.exists() or not self._path.read_text().strip():
                 self._write(copy.deepcopy(seed))
+                return
+            data = self._load()
+            missing = {name: copy.deepcopy(value) for name, value in seed.items() if name not in data}
+            if missing:
+                data.update(missing)
+                self._write(data)
 
     def read(self) -> dict:
         with self._lock:
