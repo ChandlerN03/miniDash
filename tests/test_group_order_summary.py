@@ -20,8 +20,20 @@ ONE_SECOND = timedelta(seconds=1)
 RESTAURANT = 2
 ITEM_A, ITEM_B, ITEM_C = 5, 6, 7  # on the menu of restaurant 2
 PRICE = {m["id"]: m["price_cents"] for m in SEED_DATA["menu_items"]}
+NAME = {m["id"]: m["name"] for m in SEED_DATA["menu_items"]}
 
-ENTRY_FIELDS = {"participant_id", "display_name", "subtotal_cents", "fee_share_cents", "total_cents"}
+
+def item_line(menu_item_id: int, quantity: int) -> dict:
+    """What one item line of the summary looks like."""
+    return {
+        "menu_item_id": menu_item_id,
+        "name": NAME[menu_item_id],
+        "quantity": quantity,
+        "line_total_cents": PRICE[menu_item_id] * quantity,
+    }
+
+
+ENTRY_FIELDS = {"participant_id", "display_name", "subtotal_cents", "fee_share_cents", "total_cents", "items"}
 
 
 class FakeClock:
@@ -333,7 +345,10 @@ def test_every_participant_gets_the_same_summary(service):
 
     summaries = [service.get_summary(token, code) for token in tokens]
 
-    assert summaries[0] == summaries[1] == summaries[2]
+    # Everything is the same for everyone except "you", which says who is asking.
+    without_you = [{k: v for k, v in s.items() if k != "you"} for s in summaries]
+    assert without_you[0] == without_you[1] == without_you[2]
+    assert [s["you"]["participant_id"] for s in summaries] == [1, 2, 3]
 
 
 def test_a_user_who_is_not_in_the_group_gets_not_allowed(service, repo):
@@ -490,3 +505,214 @@ def test_the_summary_uses_only_the_injected_clock(service, repo, fake_clock):
     fake_clock.advance(TWO_HOURS - ONE_SECOND)  # clock is in 2001; a real clock would say "expired"
 
     assert service.get_summary(tokens[0], code)["status"] == "OPEN"
+
+
+# ============================ the summary also tells the page where it is and who holds what
+
+
+def test_the_summary_states_the_groups_restaurant(service):
+    code_2, tokens_2 = make_group(service)  # restaurant 2
+    host = service.create_session()
+    code_1 = service.create_group_order(host, 1, "Host")["code"]  # restaurant 1
+
+    assert service.get_summary(tokens_2[0], code_2)["restaurant_id"] == 2
+    assert service.get_summary(host, code_1)["restaurant_id"] == 1
+
+
+def test_a_participant_with_no_items_has_an_empty_items_list(service):
+    code, tokens = make_group(service, ["Host", "Bo"])
+
+    entries = service.get_summary(tokens[0], code)["participants"]
+
+    assert [e["items"] for e in entries] == [[], []]
+
+
+def test_each_participant_lists_their_own_items_only(service):
+    code, tokens = make_group(service, ["Host", "Bo", "Cy"])
+    service.add_item(tokens[0], code, 1, ITEM_A, 2)
+    service.add_item(tokens[0], code, 1, ITEM_B, 1)
+    service.add_item(tokens[1], code, 2, ITEM_A, 3)
+
+    host, bo, cy = service.get_summary(tokens[2], code)["participants"]
+
+    assert host["items"] == [item_line(ITEM_A, 2), item_line(ITEM_B, 1)]
+    assert bo["items"] == [item_line(ITEM_A, 3)]  # the same menu item, kept apart
+    assert cy["items"] == []
+
+
+def test_an_item_entry_has_the_menu_item_its_name_the_quantity_and_the_line_total(service):
+    code, tokens = make_group(service)
+    service.add_item(tokens[0], code, 1, ITEM_A, 2)
+
+    item = service.get_summary(tokens[0], code)["participants"][0]["items"][0]
+
+    assert set(item) == {"menu_item_id", "name", "quantity", "line_total_cents"}
+    assert item == {"menu_item_id": ITEM_A, "name": "California Roll", "quantity": 2, "line_total_cents": 2 * 899}
+    assert type(item["menu_item_id"]) is int and type(item["quantity"]) is int
+    assert type(item["line_total_cents"]) is int and isinstance(item["name"], str)
+
+
+def test_items_in_the_summary_follow_adds_changes_and_removals(service):
+    code, tokens = make_group(service, ["Host", "Bo"])
+    service.add_item(tokens[1], code, 2, ITEM_A, 1)
+    service.add_item(tokens[1], code, 2, ITEM_A, 2)  # merged: 3
+    assert service.get_summary(tokens[0], code)["participants"][1]["items"] == [item_line(ITEM_A, 3)]
+
+    service.change_item(tokens[1], code, 2, ITEM_A, 7)
+    assert service.get_summary(tokens[0], code)["participants"][1]["items"] == [item_line(ITEM_A, 7)]
+
+    service.remove_item(tokens[0], code, 2, ITEM_A)  # the host removes it (R18)
+    assert service.get_summary(tokens[1], code)["participants"][1]["items"] == []
+
+
+def test_the_items_agree_with_the_subtotals(service):
+    code, tokens = make_group(service, ["Host", "Bo"])
+    service.add_item(tokens[0], code, 1, ITEM_A, 2)
+    service.add_item(tokens[0], code, 1, ITEM_C, 3)
+
+    entry = service.get_summary(tokens[0], code)["participants"][0]
+
+    assert entry["subtotal_cents"] == sum(PRICE[i["menu_item_id"]] * i["quantity"] for i in entry["items"])
+
+
+def test_items_are_listed_for_an_expired_group_too(service, fake_clock):
+    code, tokens = make_group(service)
+    service.add_item(tokens[0], code, 1, ITEM_A, 2)
+    fake_clock.advance(TWO_HOURS)
+
+    summary = service.get_summary(tokens[0], code)
+
+    assert summary["status"] == "EXPIRED"
+    assert summary["participants"][0]["items"] == [item_line(ITEM_A, 2)]
+
+
+def test_the_summary_never_contains_session_tokens(service):
+    code, tokens = make_group(service, ["Host", "Bo"])
+    service.add_item(tokens[1], code, 2, ITEM_A, 1)
+
+    text = json.dumps(service.get_summary(tokens[0], code))
+
+    for token in tokens:
+        assert token not in text
+
+
+def test_reading_the_summary_with_items_still_writes_nothing(service, data_file, fake_clock):
+    code, tokens = make_group(service, ["Host", "Bo"])
+    service.add_item(tokens[1], code, 2, ITEM_A, 1)
+    before = data_file.read_text()
+    fake_clock.advance(timedelta(minutes=30))
+
+    service.get_summary(tokens[0], code)
+
+    assert data_file.read_text() == before
+
+
+# ====================== for the page: restaurant name, line totals, order id and "who am I"
+
+
+def test_the_summary_has_exactly_these_top_level_fields(service):
+    code, tokens = make_group(service)
+
+    summary = service.get_summary(tokens[0], code)
+
+    assert set(summary) == {
+        "status", "delivery_fee_cents", "restaurant_id", "restaurant_name", "order_id", "you", "participants",
+    }
+
+
+def test_the_summary_states_the_restaurant_name(service):
+    code_2, tokens_2 = make_group(service)  # restaurant 2
+    host = service.create_session()
+    code_1 = service.create_group_order(host, 1, "Host")["code"]  # restaurant 1
+
+    assert service.get_summary(tokens_2[0], code_2)["restaurant_name"] == "Sakura Sushi"
+    assert service.get_summary(host, code_1)["restaurant_name"] == "Luigi's Pizzeria"
+
+
+def test_each_item_line_has_the_menu_name_and_its_line_total_in_cents(service):
+    code, tokens = make_group(service, ["Host", "Bo"])
+    service.add_item(tokens[0], code, 1, ITEM_A, 3)
+    service.add_item(tokens[1], code, 2, ITEM_C, 9)
+
+    host, bo = service.get_summary(tokens[0], code)["participants"]
+
+    assert host["items"] == [{"menu_item_id": ITEM_A, "name": "California Roll", "quantity": 3, "line_total_cents": 2697}]
+    assert bo["items"] == [{"menu_item_id": ITEM_C, "name": "Miso Soup", "quantity": 9, "line_total_cents": 3591}]
+
+
+def test_the_line_totals_add_up_to_the_subtotal(service):
+    code, tokens = make_group(service, ["Host", "Bo"])
+    service.add_item(tokens[0], code, 1, ITEM_A, 2)
+    service.add_item(tokens[0], code, 1, ITEM_B, 1)
+    service.add_item(tokens[0], code, 1, ITEM_C, 4)
+
+    entry = service.get_summary(tokens[1], code)["participants"][0]
+
+    assert sum(i["line_total_cents"] for i in entry["items"]) == entry["subtotal_cents"] == 2 * 899 + 1099 + 4 * 399
+
+
+def test_line_totals_follow_a_menu_price_change_like_the_subtotals_do(service, data_file):
+    code, tokens = make_group(service)
+    service.add_item(tokens[0], code, 1, ITEM_A, 2)
+    data = json.loads(data_file.read_text())
+    for item in data["menu_items"]:
+        if item["id"] == ITEM_A:
+            item["price_cents"] = 1000
+    data_file.write_text(json.dumps(data))
+
+    entry = service.get_summary(tokens[0], code)["participants"][0]
+
+    assert entry["items"][0]["line_total_cents"] == 2000 == entry["subtotal_cents"]
+
+
+def test_the_order_id_is_none_until_checkout(service, repo):
+    code, tokens = make_group(service)
+
+    assert service.get_summary(tokens[0], code)["order_id"] is None
+
+    set_status(repo, code, "LOCKED")
+    assert service.get_summary(tokens[0], code)["order_id"] is None
+
+
+def test_you_tells_each_caller_their_own_participant_id_and_whether_they_are_the_host(service):
+    code, tokens = make_group(service, ["Host", "Bo", "Cy"])
+
+    assert service.get_summary(tokens[0], code)["you"] == {"participant_id": 1, "is_host": True}
+    assert service.get_summary(tokens[1], code)["you"] == {"participant_id": 2, "is_host": False}
+    assert service.get_summary(tokens[2], code)["you"] == {"participant_id": 3, "is_host": False}
+
+
+def test_you_has_only_the_participant_id_and_the_host_flag(service):
+    code, tokens = make_group(service)
+
+    you = service.get_summary(tokens[0], code)["you"]
+
+    assert set(you) == {"participant_id", "is_host"}
+    assert type(you["participant_id"]) is int and type(you["is_host"]) is bool
+
+
+def test_the_host_flag_follows_host_token_not_participant_1(service, repo):
+    code, tokens = make_group(service, ["Host", "Bo"])
+    repo.update_group_order(code, lambda group: group.update(host_token=tokens[1]))
+
+    assert service.get_summary(tokens[0], code)["you"] == {"participant_id": 1, "is_host": False}
+    assert service.get_summary(tokens[1], code)["you"] == {"participant_id": 2, "is_host": True}
+
+
+def test_the_new_fields_are_present_on_an_expired_summary_too(service, fake_clock):
+    code, tokens = make_group(service, ["Host", "Bo"])
+    service.add_item(tokens[1], code, 2, ITEM_A, 1)
+    fake_clock.advance(TWO_HOURS)
+
+    summary = service.get_summary(tokens[1], code)
+
+    assert summary["status"] == "EXPIRED"
+    assert summary["order_id"] is None
+    assert summary["restaurant_name"] == "Sakura Sushi"
+    assert summary["you"] == {"participant_id": 2, "is_host": False}
+
+
+def test_a_rejected_outsider_still_gets_no_summary_and_so_no_you(service):
+    code, _ = make_group(service)
+
+    assert_rejected("NOT_ALLOWED", service.get_summary, service.create_session(), code)

@@ -30,7 +30,7 @@ def create_group_order(body: GroupOrderIn, request: Request, x_session_token: st
 def join(code: str, body: JoinIn, request: Request, x_session_token: str | None = Header(default=None)):
     participant = _service(request).join(x_session_token, code, body.display_name)
     # The participant's token stays server-side; send back only what the client needs.
-    return {key: participant[key] for key in ("participant_id", "display_name", "joined_at")}
+    return {key: participant[key] for key in ("participant_id", "display_name", "joined_at", "restaurant_id")}
 
 
 @router.post("/group-orders/{code}/participants/{participant_id}/items", status_code=201)

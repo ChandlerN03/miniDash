@@ -17,6 +17,18 @@ RESTAURANT = 2
 ITEM_A, ITEM_B = 5, 6  # restaurant 2 menu: A = 899 cents, B = 1099 cents
 OTHER_RESTAURANT_ITEM = 1
 ADDRESS = "12 Elm Street"
+SEED_MENU = {m["id"]: m for m in __import__("src.store.seed", fromlist=["SEED_DATA"]).SEED_DATA["menu_items"]}
+
+
+def item_line(menu_item_id: int, quantity: int) -> dict:
+    """What one item line of the summary looks like."""
+    menu_item = SEED_MENU[menu_item_id]
+    return {
+        "menu_item_id": menu_item_id,
+        "name": menu_item["name"],
+        "quantity": quantity,
+        "line_total_cents": menu_item["price_cents"] * quantity,
+    }
 
 
 # ------------------------------------------------------------------ test client
@@ -290,7 +302,7 @@ def test_join_does_not_send_the_session_token_back(api):
 
     body = api.post(group_path(code, "/join"), {"display_name": "Bo"}, token=guest).json()
 
-    assert set(body) == {"participant_id", "display_name", "joined_at"}
+    assert set(body) == {"participant_id", "display_name", "joined_at", "restaurant_id"}
     assert guest not in json.dumps(body)
 
 
@@ -564,8 +576,15 @@ def test_summary_returns_200_with_each_participant_in_join_order(api):
 
     assert response.status_code == 200
     body = response.json()
+    assert set(body) == {
+        "status", "delivery_fee_cents", "restaurant_id", "restaurant_name", "order_id", "you", "participants",
+    }
+    assert body["restaurant_name"] == "Sakura Sushi"
+    assert body["order_id"] is None
+    assert body["you"] == {"participant_id": 2, "is_host": False}  # this request was made by the guest
     assert body["status"] == "OPEN"
     assert body["delivery_fee_cents"] == 499
+    assert body["restaurant_id"] == RESTAURANT
     host_entry, guest_entry = body["participants"]
     assert host_entry == {
         "participant_id": 1,
@@ -573,6 +592,7 @@ def test_summary_returns_200_with_each_participant_in_join_order(api):
         "subtotal_cents": 2 * 899,
         "fee_share_cents": 249,
         "total_cents": 2 * 899 + 249,
+        "items": [item_line(ITEM_A, 2)],
     }
     assert guest_entry == {
         "participant_id": 2,
@@ -580,6 +600,7 @@ def test_summary_returns_200_with_each_participant_in_join_order(api):
         "subtotal_cents": 1099,
         "fee_share_cents": 250,
         "total_cents": 1099 + 250,
+        "items": [item_line(ITEM_B, 1)],
     }
 
 
@@ -951,7 +972,13 @@ class RecordingService:
 
     def join(self, token, code, display_name):
         self.calls.append(("join", token, code, display_name))
-        return {"participant_id": 2, "token": token, "display_name": display_name, "joined_at": "t"}
+        return {
+            "participant_id": 2,
+            "token": token,
+            "display_name": display_name,
+            "joined_at": "t",
+            "restaurant_id": 3,
+        }
 
     def add_item(self, token, code, participant_id, menu_item_id, quantity):
         self.calls.append(("add_item", token, code, participant_id, menu_item_id, quantity))
@@ -1003,7 +1030,7 @@ def test_join_passes_the_header_code_and_name(api, recorder):
 
     assert response.status_code == 201
     assert recorder.calls == [("join", "tok-2", "Ab3dEf", "Bo")]
-    assert response.json() == {"participant_id": 2, "display_name": "Bo", "joined_at": "t"}  # no token
+    assert response.json() == {"participant_id": 2, "display_name": "Bo", "joined_at": "t", "restaurant_id": 3}  # no token
 
 
 def test_add_item_passes_integer_path_parameters_and_the_body(api, recorder):
@@ -1160,3 +1187,115 @@ def test_group_orders_survive_restarting_the_app(data_file, fake_clock):
     assert summary.status_code == 200
     assert len(summary.json()["participants"]) == 2
     assert second.post(group_path(group.code, "/lock"), token=group.host).status_code == 200
+
+
+# ===== what a page needs to know: the restaurant after joining, and who holds which items
+
+
+def test_a_joiner_learns_the_restaurant_from_the_join_response(api):
+    host = new_session(api)
+    code = api.post("/group-orders", {"restaurant_id": 1, "display_name": "Hana"}, token=host).json()["code"]
+    guest = new_session(api)
+
+    joined = api.post(group_path(code, "/join"), {"display_name": "Bo"}, token=guest).json()
+
+    assert joined["restaurant_id"] == 1
+    menu = api.get(f"/restaurants/{joined['restaurant_id']}/menu").json()  # the menu the page will show
+    assert {item["id"] for item in menu} == {1, 2, 3, 4}
+
+
+def test_the_summary_tells_anyone_in_the_group_the_restaurant(api):
+    host = new_session(api)
+    code = api.post("/group-orders", {"restaurant_id": 3, "display_name": "Hana"}, token=host).json()["code"]
+    guest, _ = join_group(api, code)
+
+    assert api.get(group_path(code, "/summary"), token=guest).json()["restaurant_id"] == 3
+    assert api.get(group_path(code, "/summary"), token=host).json()["restaurant_id"] == 3
+
+
+def test_the_summary_lists_each_participants_items_so_a_page_can_show_their_own(api):
+    group = ready_group(api)
+    add_item(api, group.guest, group.code, group.guest_id, ITEM_A, 2)
+
+    entries = api.get(group_path(group.code, "/summary"), token=group.guest).json()["participants"]
+
+    assert entries[0]["items"] == [item_line(ITEM_A, 2)]
+    assert entries[1]["items"] == [item_line(ITEM_B, 1), item_line(ITEM_A, 2)]
+
+
+def test_the_summary_items_follow_change_and_delete(api):
+    group = ready_group(api)
+
+    api.patch(item_path(group.code, group.guest_id, ITEM_B), {"quantity": 5}, token=group.guest)
+    after_change = api.get(group_path(group.code, "/summary"), token=group.host).json()["participants"][1]
+    api.delete(item_path(group.code, group.guest_id, ITEM_B), token=group.guest)
+    after_delete = api.get(group_path(group.code, "/summary"), token=group.host).json()["participants"][1]
+
+    assert after_change["items"] == [item_line(ITEM_B, 5)]
+    assert after_delete["items"] == []
+
+
+def test_when_the_host_removes_an_item_the_guests_summary_shows_it_gone(api):
+    group = ready_group(api)
+
+    api.delete(item_path(group.code, group.guest_id, ITEM_B), token=group.host)  # R18
+
+    entries = api.get(group_path(group.code, "/summary"), token=group.guest).json()["participants"]
+    assert entries[1]["items"] == []  # a page that asks again no longer shows a stale item
+
+
+def test_no_session_token_appears_in_the_summary_response(api):
+    group = ready_group(api)
+
+    text = api.get(group_path(group.code, "/summary"), token=group.guest).body.decode()
+
+    assert group.host not in text and group.guest not in text
+
+
+# ===== what the receipt needs: order id for everyone, who I am, names and line totals
+
+
+def test_the_summary_tells_each_caller_who_they_are_and_whether_they_are_the_host(api):
+    group = ready_group(api)
+
+    host_view = api.get(group_path(group.code, "/summary"), token=group.host).json()
+    guest_view = api.get(group_path(group.code, "/summary"), token=group.guest).json()
+
+    assert host_view["you"] == {"participant_id": 1, "is_host": True}
+    assert guest_view["you"] == {"participant_id": group.guest_id, "is_host": False}
+
+
+def test_a_guest_learns_the_order_id_from_the_summary_without_the_hosts_checkout_response(api):
+    group = locked_group(api)
+    assert api.get(group_path(group.code, "/summary"), token=group.guest).json()["order_id"] is None
+
+    checkout = api.post(group_path(group.code, "/checkout"), {"address": ADDRESS}, token=group.host)
+
+    guest_view = api.get(group_path(group.code, "/summary"), token=group.guest).json()
+    assert guest_view["status"] == "CHECKED_OUT"
+    assert guest_view["order_id"] == checkout.json()["order_id"]
+
+
+def test_everything_a_receipt_needs_is_in_one_summary_response(api):
+    group = locked_group(api)
+    api.post(group_path(group.code, "/checkout"), {"address": ADDRESS}, token=group.host)
+
+    summary = api.get(group_path(group.code, "/summary"), token=group.guest).json()
+
+    me = next(e for e in summary["participants"] if e["participant_id"] == summary["you"]["participant_id"])
+    assert summary["restaurant_name"] == "Sakura Sushi"
+    assert me["items"] == [item_line(ITEM_B, 1)]
+    assert (me["subtotal_cents"], me["fee_share_cents"], me["total_cents"]) == (1099, 250, 1349)
+    assert sum(e["total_cents"] for e in summary["participants"]) == api.get(f"/orders/{summary['order_id']}").json()[
+        "total_cents"
+    ]
+
+
+def test_the_summary_order_id_is_none_for_an_expired_group(api, fake_clock):
+    group = ready_group(api)
+    fake_clock.advance(TWO_HOURS)
+
+    summary = api.get(group_path(group.code, "/summary"), token=group.guest).json()
+
+    assert summary["status"] == "EXPIRED"
+    assert summary["order_id"] is None

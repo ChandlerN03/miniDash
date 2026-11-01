@@ -771,3 +771,40 @@ def test_all_times_come_from_the_injected_clock(service, repo, data_file):
     stamps += [s["created_at"] for s in data["sessions"].values()]
 
     assert all(stamp.startswith("2001-01-01") for stamp in stamps), stamps
+
+
+# ===================================== the join result tells the joiner which restaurant
+
+
+def test_join_returns_the_restaurant_of_the_group(service):
+    host = service.create_session()
+    code = service.create_group_order(host, 1, "Host")["code"]  # restaurant 1
+
+    result = service.join(new_user(service), code, "Bo")
+
+    assert result["restaurant_id"] == 1
+
+
+def test_join_returns_the_restaurant_for_another_group_too(service):
+    _, code = new_group(service, restaurant_id=2)
+
+    assert service.join(new_user(service), code, "Bo")["restaurant_id"] == 2
+
+
+def test_the_restaurant_is_not_added_to_the_stored_participant(service, repo):
+    _, code = new_group(service)
+    guest = new_user(service)
+
+    service.join(guest, code, "Bo")
+
+    stored = repo.get_group_order(code)["participants"][1]
+    assert set(stored) == {"participant_id", "token", "display_name", "joined_at"}
+
+
+def test_a_rejected_join_returns_no_restaurant_and_changes_nothing(service, repo):
+    host, code = new_group(service)
+    before = repo.get_group_order(code)
+
+    assert_rejected("ALREADY_JOINED", service.join, host, code, "Hana")
+
+    assert repo.get_group_order(code) == before

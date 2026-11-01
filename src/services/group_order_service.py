@@ -120,7 +120,9 @@ class GroupOrderService:
             }
             group["participants"].append(participant)
             group["last_activity_at"] = now  # a successful join is activity (R30)
-            return None, participant
+            # A copy with the restaurant added, so the joiner knows which menu to show.
+            # The stored participant record does not get a restaurant_id.
+            return None, {**participant, "restaurant_id": group["restaurant_id"]}
 
         try:
             rejection, participant = self._groups.update_group_order(code, attempt)
@@ -205,20 +207,28 @@ class GroupOrderService:
 
         if not any(p["token"] == token for p in group["participants"]):
             raise MiniDashError(errors.NOT_ALLOWED, "Only participants can see the summary.")
-        return self._build_summary(group)
+        return self._build_summary(group, token)
 
-    def _build_summary(self, group: dict) -> dict:
-        # Prices are read from the menu now and never stored on the group order.
-        prices = {item["id"]: item["price_cents"] for item in self._restaurants.list_menu(group["restaurant_id"])}
+    def _build_summary(self, group: dict, token: str) -> dict:
+        # Names and prices are read from the menu now and never stored on the group order.
+        menu = {item["id"]: item for item in self._restaurants.list_menu(group["restaurant_id"])}
+        restaurant = self._restaurants.get_restaurant(group["restaurant_id"])
         shares = split_evenly(DELIVERY_FEE_CENTS, len(group["participants"]))  # R22-R24, join order
+        me = next(p for p in group["participants"] if p["token"] == token)  # get_summary checked this
 
         entries = []
         for participant, fee_share in zip(group["participants"], shares):
-            subtotal = sum(
-                prices[item["menu_item_id"]] * item["quantity"]
+            items = [
+                {
+                    "menu_item_id": item["menu_item_id"],
+                    "name": menu[item["menu_item_id"]]["name"],
+                    "quantity": item["quantity"],
+                    "line_total_cents": menu[item["menu_item_id"]]["price_cents"] * item["quantity"],
+                }
                 for item in group["items"]
                 if item["participant_id"] == participant["participant_id"]
-            )
+            ]
+            subtotal = sum(item["line_total_cents"] for item in items)
             entries.append(
                 {
                     "participant_id": participant["participant_id"],
@@ -226,9 +236,19 @@ class GroupOrderService:
                     "subtotal_cents": subtotal,
                     "fee_share_cents": fee_share,
                     "total_cents": subtotal + fee_share,
+                    "items": items,
                 }
             )
-        return {"status": group["status"], "delivery_fee_cents": DELIVERY_FEE_CENTS, "participants": entries}
+        return {
+            "status": group["status"],
+            "delivery_fee_cents": DELIVERY_FEE_CENTS,
+            "restaurant_id": group["restaurant_id"],
+            "restaurant_name": restaurant["name"],
+            "order_id": group["order_id"],  # None until the host checks out
+            # Who is asking. Never a token: only the participant id and the host flag.
+            "you": {"participant_id": me["participant_id"], "is_host": token == group["host_token"]},
+            "participants": entries,
+        }
 
     # ------------------------------------------------------------- lock (R25-R27)
 

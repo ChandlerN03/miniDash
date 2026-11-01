@@ -817,3 +817,44 @@ def test_the_other_order_checks_still_apply_when_a_fee_is_given(orders, data_fil
     assert_rejected("EMPTY_ORDER", orders.create_order, RESTAURANT, "1 Main St", [], 499)
 
     assert orders_in_file(data_file) == []
+
+
+# ================= every participant can learn the order id from the summary (for the receipt)
+
+
+def test_the_summary_shows_the_order_id_to_the_host_and_to_every_guest_after_checkout(service):
+    code, tokens = make_locked(service, [[(ITEM_A, 2)], [(ITEM_B, 1)], [(ITEM_C, 4)]])
+
+    order_id = service.checkout(tokens[0], code, ADDRESS)["order_id"]
+
+    for token in tokens:
+        summary = service.get_summary(token, code)
+        assert summary["status"] == "CHECKED_OUT"
+        assert summary["order_id"] == order_id
+
+
+def test_the_order_id_in_the_summary_is_the_id_of_the_one_normal_order(service, orders, data_file):
+    code, tokens = make_locked(service)
+    service.checkout(tokens[0], code, ADDRESS)
+
+    order_id = service.get_summary(tokens[1], code)["order_id"]
+
+    assert [o["id"] for o in orders_in_file(data_file)] == [order_id]
+    assert orders.get_order(order_id)["restaurant_id"] == RESTAURANT
+
+
+def test_the_summary_order_id_is_none_after_a_failed_checkout(service):
+    code, tokens = make_locked(service)
+    assert_rejected("INVALID_ADDRESS", service.checkout, tokens[0], code, "  ")
+
+    assert service.get_summary(tokens[0], code)["order_id"] is None
+
+
+def test_the_group_total_in_the_summary_matches_the_order_total(service, orders):
+    code, tokens = make_locked(service, [[(ITEM_A, 2)], [(ITEM_B, 1)], [(ITEM_C, 4)]])
+    service.checkout(tokens[0], code, ADDRESS)
+
+    summary = service.get_summary(tokens[2], code)
+
+    group_total = sum(entry["total_cents"] for entry in summary["participants"])
+    assert group_total == orders.get_order(summary["order_id"])["total_cents"]

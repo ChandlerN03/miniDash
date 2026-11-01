@@ -1,0 +1,891 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MiniDash group order</title>
+<style>
+  /* ---- Design tokens. Every color on the page comes from here (light theme first). ---- */
+  :root {
+    --font: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    --space-1: 4px; --space-2: 8px; --space-3: 12px; --space-4: 16px; --space-5: 24px; --space-6: 32px; --space-7: 48px;
+    --radius-sm: 6px; --radius-md: 12px; --radius-lg: 16px; --radius-pill: 999px;
+    --shadow-sm: 0 1px 2px rgba(17, 24, 39, 0.08);
+    --shadow-md: 0 4px 12px rgba(17, 24, 39, 0.12);
+    --shadow-lg: 0 16px 40px rgba(17, 24, 39, 0.28);
+    --text-xs: 0.8125rem; --text-sm: 0.875rem; --text-base: 1rem; --text-lg: 1.125rem; --text-xl: 1.375rem;
+    --text-2xl: 2rem; --text-code: 1.5rem;
+    --tap: 44px;
+    --bg: #F3F4F6; --surface: #FFFFFF; --ink: #111827; --muted: #4B5563; --highlight: #FDECE8;
+    --border: #D1D5DB; --field-bg: #FFFFFF; --field-border: #6B7280; --focus: #1D4ED8; --backdrop: rgba(17, 24, 39, 0.55);
+    --primary: #C9331E; --primary-hover: #A82B19; --on-primary: #FFFFFF;
+    --success-fg: #14532D; --success-bg: #DCFCE7; --danger-fg: #991B1B; --danger-bg: #FEE2E2;
+    --open-fg: #14532D; --open-bg: #DCFCE7; --locked-fg: #78350F; --locked-bg: #FEF3C7;
+    --expired-fg: #374151; --expired-bg: #E5E7EB; --done-fg: #1E3A8A; --done-bg: #DBEAFE;
+    --toast-fg: #FFFFFF; --toast-bg: #111827;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.5);
+      --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.5);
+      --shadow-lg: 0 16px 40px rgba(0, 0, 0, 0.7);
+      --bg: #0B0F14; --surface: #151A21; --ink: #F3F4F6; --muted: #A7B0BC; --highlight: #2B1B18;
+      --border: #2D3541; --field-bg: #0F141B; --field-border: #8B95A3; --focus: #93C5FD; --backdrop: rgba(0, 0, 0, 0.7);
+      --success-fg: #86EFAC; --success-bg: #052E16; --danger-fg: #FCA5A5; --danger-bg: #450A0A;
+      --open-fg: #86EFAC; --open-bg: #052E16; --locked-fg: #FCD34D; --locked-bg: #422006;
+      --expired-fg: #D1D5DB; --expired-bg: #374151; --done-fg: #BFDBFE; --done-bg: #172554;
+      --toast-fg: #111827; --toast-bg: #F3F4F6;
+    }
+  }
+  /* ---- Base ---- */
+  *, *::before, *::after { box-sizing: border-box; }
+  html { -webkit-text-size-adjust: 100%; }
+  body { margin: 0; background: var(--bg); color: var(--ink); font: var(--text-base) / 1.5 var(--font); }
+  [hidden] { display: none !important; }
+  h1, h2, h3, p, ul { margin: 0; }
+  h1 { font-size: var(--text-lg); font-weight: 800; }
+  h2 { font-size: var(--text-lg); }
+  h3 { font-size: var(--text-base); }
+  ul { padding: 0; list-style: none; }
+  main { max-width: 72rem; margin: 0 auto; padding: var(--space-4); display: grid; gap: var(--space-4); }
+  footer { padding: var(--space-5) var(--space-4); text-align: center; color: var(--muted); font-size: var(--text-sm); }
+  .muted { color: var(--muted); }
+  .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+  :focus-visible { outline: 3px solid var(--focus); outline-offset: 2px; }
+  /* ---- Top bar ---- */
+  #topbar { position: sticky; top: 0; z-index: 10; display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between;
+    gap: var(--space-2) var(--space-4); padding: var(--space-2) var(--space-4); background: var(--surface);
+    border-top: 4px solid var(--primary); border-bottom: 1px solid var(--border); box-shadow: var(--shadow-sm); }
+  #code-chip { display: flex; align-items: center; gap: var(--space-2); min-width: 0; }
+  #share-code { font-family: var(--mono); font-size: var(--text-code); font-weight: 700; letter-spacing: 0.12em; overflow-wrap: anywhere; }
+  /* ---- Cards, forms, buttons ---- */
+  .card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-md); box-shadow: var(--shadow-sm);
+    padding: var(--space-4); min-width: 0; max-width: 100%; }
+  .stack { display: grid; gap: var(--space-3); }
+  .row { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--space-2); }
+  label { display: block; margin-bottom: var(--space-1); font-weight: 600; }
+  button, input, select { min-height: var(--tap); font: inherit; border-radius: var(--radius-sm); max-width: 100%; }
+  input, select { width: 100%; padding: 0 var(--space-3); background: var(--field-bg); color: var(--ink); border: 1px solid var(--field-border); }
+  input::placeholder { color: var(--muted); }
+  .btn { display: inline-flex; align-items: center; justify-content: center; gap: var(--space-2); padding: 0 var(--space-4);
+    background: var(--surface); color: var(--ink); border: 1px solid var(--field-border); font-weight: 600; cursor: pointer;
+    transition: background-color 150ms ease, border-color 150ms ease, box-shadow 150ms ease; }
+  .btn:hover:not(:disabled) { background: var(--highlight); box-shadow: var(--shadow-sm); }
+  .btn-primary { background: var(--primary); color: var(--on-primary); border-color: var(--primary); }
+  .btn-primary:hover:not(:disabled) { background: var(--primary-hover); border-color: var(--primary-hover); }
+  .btn-danger { color: var(--danger-fg); }
+  .btn:disabled { opacity: 0.55; cursor: not-allowed; }
+  .btn.is-loading:disabled { opacity: 0.85; cursor: progress; }
+  .is-loading::after { content: ""; width: 1em; height: 1em; border: 2px solid currentColor; border-right-color: transparent;
+    border-radius: 50%; animation: spin 700ms linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  /* ---- Status badge ---- */
+  .badge { display: inline-flex; align-items: center; gap: var(--space-1); padding: var(--space-1) var(--space-3);
+    border: 1px solid currentColor; border-radius: var(--radius-pill); font-size: var(--text-sm); font-weight: 700; }
+  .badge-open { color: var(--open-fg); background: var(--open-bg); }
+  .badge-locked { color: var(--locked-fg); background: var(--locked-bg); }
+  .badge-expired { color: var(--expired-fg); background: var(--expired-bg); }
+  .badge-done { color: var(--done-fg); background: var(--done-bg); }
+  /* ---- Layout: one column, two columns from 900px ---- */
+  .layout { display: grid; gap: var(--space-4); }
+  #menu-column, #summary-column { display: grid; gap: var(--space-4); align-content: start; min-width: 0; }
+  @media (min-width: 900px) {
+    .layout { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); align-items: start; }
+    #topbar { padding-left: var(--space-6); padding-right: var(--space-6); }
+  }
+  /* ---- Lists, menu cards, steppers ---- */
+  .list { display: grid; gap: var(--space-3); }
+  .menu-card, .line { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2) var(--space-3); }
+  .menu-card { padding: var(--space-3); border: 1px solid var(--border); border-radius: var(--radius-md); background: var(--surface); }
+  .item-info { flex: 1 1 10rem; display: grid; min-width: 0; overflow-wrap: anywhere; }
+  .stepper { display: inline-flex; align-items: center; }
+  .stepper button { min-width: var(--tap); padding: 0; background: var(--surface); color: var(--ink); border: 1px solid var(--field-border);
+    font-weight: 700; font-size: var(--text-lg); cursor: pointer; }
+  .stepper button:disabled { opacity: 0.55; cursor: not-allowed; }
+  .stepper output { min-width: 2.25rem; text-align: center; font-weight: 700; font-variant-numeric: tabular-nums; }
+  .line { padding: var(--space-3) 0; border-bottom: 1px solid var(--border); }
+  .line:last-child { border-bottom: 0; }
+  .empty { padding: var(--space-4); text-align: center; color: var(--muted); border: 1px dashed var(--field-border); border-radius: var(--radius-md); }
+  /* ---- Summary table ---- */
+  table { width: 100%; border-collapse: collapse; font-size: var(--text-sm); }
+  th, td { padding: var(--space-2); text-align: left; border-bottom: 1px solid var(--border); overflow-wrap: anywhere; }
+  th { color: var(--muted); font-weight: 600; }
+  th.money, td.money { text-align: right; }
+  td.money { white-space: nowrap; font-variant-numeric: tabular-nums; }
+  tr.me { background: var(--highlight); }
+  tfoot td, tfoot th { font-weight: 700; color: var(--ink); border-top: 2px solid var(--ink); border-bottom: 0; }
+  /* ---- Dialogs and toasts ---- */
+  dialog { width: calc(100% - var(--space-5)); max-width: 30rem; padding: 0; border: 0; border-radius: var(--radius-lg);
+    background: var(--surface); color: var(--ink); box-shadow: var(--shadow-lg); overflow: hidden; }
+  dialog::backdrop { background: var(--backdrop); }
+  .dialog-head { display: flex; align-items: center; gap: var(--space-3); padding: var(--space-4) var(--space-5); }
+  .dialog-head h2 { font-size: var(--text-xl); }
+  #error-dialog .dialog-head { background: var(--danger-bg); color: var(--danger-fg); }
+  #receipt-dialog .dialog-head { background: var(--success-bg); color: var(--success-fg); }
+  .dialog-body { display: grid; gap: var(--space-3); padding: var(--space-5); overflow-wrap: anywhere; }
+  .dialog-foot { display: flex; justify-content: flex-end; padding: 0 var(--space-5) var(--space-5); }
+  .receipt-row { display: flex; justify-content: space-between; align-items: baseline; gap: var(--space-3); }
+  #receipt-lines { display: grid; gap: var(--space-2); padding-bottom: var(--space-3); border-bottom: 1px solid var(--border); }
+  #receipt-total { font-size: var(--text-2xl); font-weight: 800; }
+  #receipt-group-total { font-size: var(--text-sm); color: var(--muted); }
+  #toast-region { position: fixed; left: 0; right: 0; bottom: var(--space-4); z-index: 30; display: grid; justify-items: center;
+    gap: var(--space-2); padding: 0 var(--space-4); pointer-events: none; }
+  .toast { max-width: 100%; padding: var(--space-3) var(--space-4); background: var(--toast-bg); color: var(--toast-fg);
+    border-radius: var(--radius-pill); box-shadow: var(--shadow-md); overflow-wrap: anywhere; opacity: 0; transition: opacity 200ms ease; }
+  .toast.show { opacity: 1; }
+
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after { transition: none !important; animation: none !important; }
+  }
+</style>
+</head>
+<body>
+<header id="topbar">
+  <h1>MiniDash</h1>
+  <div id="code-chip" hidden>
+    <span class="muted">Code</span>
+    <span id="share-code"></span>
+    <button id="copy-button" type="button" class="btn">Copy</button>
+  </div>
+</header>
+
+<main id="main" tabindex="-1">
+  <section id="start-screen" class="stack" aria-labelledby="start-title">
+    <div>
+      <h2 id="start-title">Order together</h2>
+      <p class="muted">Start a group order and share the code, or join a friend's.</p>
+    </div>
+    <div class="card stack">
+      <label for="display-name">Your name</label>
+      <input id="display-name" type="text" maxlength="40" autocomplete="off" placeholder="For example, Hana">
+    </div>
+    <div class="card stack">
+      <h3>Start a new group order</h3>
+      <label for="restaurant-select">Restaurant</label>
+      <select id="restaurant-select"></select>
+      <button id="create-button" type="button" class="btn btn-primary">Create group order</button>
+    </div>
+    <div class="card stack">
+      <h3>Join with a code</h3>
+      <label for="share-code-input">Share code</label>
+      <input id="share-code-input" type="text" maxlength="12" autocomplete="off" spellcheck="false" placeholder="6 characters">
+      <button id="join-button" type="button" class="btn btn-primary">Join</button>
+    </div>
+  </section>
+
+  <div id="group-screen" hidden>
+    <div class="stack">
+      <section id="restaurant-card" class="card stack" aria-labelledby="restaurant-name">
+        <div class="row">
+          <h2 id="restaurant-name" tabindex="-1"></h2>
+          <div id="status-region" aria-live="polite"><span id="status-badge" class="badge"></span></div>
+        </div>
+        <p id="restaurant-meta" class="muted"></p>
+        <p id="status-note"></p>
+        <p class="muted">Delivery fee: <strong id="delivery-fee"></strong>, split evenly between everyone.</p>
+      </section>
+
+      <div class="layout">
+        <div id="menu-column">
+          <section class="card stack" aria-labelledby="menu-title">
+            <h2 id="menu-title">Menu</h2>
+            <ul id="menu-list" class="list"></ul>
+          </section>
+        </div>
+
+        <div id="summary-column">
+          <section class="card stack" aria-labelledby="mine-title">
+            <h2 id="mine-title">My items</h2>
+            <ul id="my-items"></ul>
+          </section>
+
+          <section class="card stack" aria-labelledby="summary-title">
+            <div class="row">
+              <h2 id="summary-title">Summary</h2>
+              <button id="refresh-button" type="button" class="btn">Refresh</button>
+            </div>
+            <div id="summary-region" aria-live="polite">
+              <table id="summary-table">
+                <caption class="sr-only">What each person owes</caption>
+                <thead>
+                  <tr><th scope="col">Name</th><th scope="col" class="money">Subtotal</th><th scope="col" class="money">Fee share</th><th scope="col" class="money">Total</th></tr>
+                </thead>
+                <tbody id="summary-body"></tbody>
+                <tfoot id="summary-foot"></tfoot>
+              </table>
+            </div>
+            <div id="order-result" class="row" hidden>
+              <p id="order-result-text"></p>
+              <button id="view-receipt-button" type="button" class="btn btn-primary">View receipt</button>
+            </div>
+          </section>
+
+          <section id="host-controls" class="card stack" aria-labelledby="host-title" hidden>
+            <h2 id="host-title">Host controls</h2>
+            <p class="muted">Lock the order once everyone has at least one item, then check out.</p>
+            <button id="lock-button" type="button" class="btn btn-primary">Lock group order</button>
+            <div>
+              <label for="address-input">Delivery address</label>
+              <input id="address-input" type="text" autocomplete="street-address" placeholder="Street, number, city">
+            </div>
+            <button id="checkout-button" type="button" class="btn btn-primary">Checkout</button>
+          </section>
+        </div>
+      </div>
+    </div>
+  </div>
+</main>
+
+<footer>Prices are in US dollars. Restaurant opening hours are in UTC.</footer>
+
+<div id="toast-region" aria-live="polite"></div>
+
+<dialog id="error-dialog" role="alertdialog" aria-labelledby="error-title" aria-describedby="error-text">
+  <div class="dialog-head"><span aria-hidden="true">!</span><h2 id="error-title"></h2></div>
+  <div class="dialog-body"><p id="error-text"></p><p id="error-detail" hidden></p></div>
+  <div class="dialog-foot"><button id="error-ok" type="button" class="btn btn-primary">OK</button></div>
+</dialog>
+
+<dialog id="receipt-dialog" aria-labelledby="receipt-title">
+  <div class="dialog-head"><span aria-hidden="true">&#10003;</span><h2 id="receipt-title">Order placed</h2></div>
+  <div class="dialog-body">
+    <p>Order <strong id="receipt-order-id"></strong> from <strong id="receipt-restaurant"></strong></p>
+    <ul id="receipt-lines"></ul>
+    <div class="receipt-row"><span>Food subtotal</span><span id="receipt-subtotal"></span></div>
+    <div class="receipt-row"><span>Your delivery fee share</span><span id="receipt-fee"></span></div>
+    <div class="receipt-row"><strong>Your total</strong><span id="receipt-total"></span></div>
+    <div class="receipt-row"><span class="muted">Group total</span><span id="receipt-group-total"></span></div>
+  </div>
+  <div class="dialog-foot"><button id="receipt-close" type="button" class="btn btn-primary">Close</button></div>
+</dialog>
+
+<script>
+"use strict";
+
+var POLL_MS = 4000;
+var TOAST_MS = 3000;
+var MIN_QUANTITY = 1;
+var MAX_QUANTITY = 9;
+var TOKEN_KEY = "minidash.token";
+var GROUP_KEY = "minidash.group";
+var RECEIPT_KEY = "minidash.receipt.";
+var EXPIRED_KEY = "minidash.expired.";
+var TERMINAL = ["CHECKED_OUT", "EXPIRED"];
+var GENERIC_TITLE = "Something went wrong";
+var GENERIC_MESSAGE = "Something unexpected happened. Please try again.";
+
+var STATUS = {
+  OPEN: { label: "Open", symbol: "\u25CF", cls: "open", note: "Add your items. The host locks the order when everyone is ready." },
+  LOCKED: { label: "Locked", symbol: "\u25A0", cls: "locked", note: "The host has locked the order. Waiting for checkout." },
+  EXPIRED: { label: "Expired", symbol: "\u2715", cls: "expired", note: "This group order expired. Start a new one." },
+  CHECKED_OUT: { label: "Checked out", symbol: "\u2713", cls: "done", note: "This order has been placed." }
+};
+
+// One title and one explanation per error code. Anything not listed gets the generic ones.
+var TITLES = {
+  INVALID_SESSION: "Session expired", RESTAURANT_NOT_FOUND: "Restaurant not found", INVALID_CODE: "Code not found",
+  GROUP_FULL: "Group is full", ALREADY_JOINED: "Already joined", ORDER_LOCKED: "Order is locked",
+  ORDER_EXPIRED: "Group order expired", ORDER_CHECKED_OUT: "Order already placed", INVALID_QUANTITY: "Check the quantity",
+  ITEM_NOT_ON_MENU: "Not on the menu", NOT_ALLOWED: "Not allowed", NOT_HOST: "Host only",
+  EMPTY_PARTICIPANT: "Someone has no items", NOT_LOCKED: "Lock the order first", RESTAURANT_CLOSED: "Restaurant is closed",
+  INVALID_ADDRESS: "Address needed", ITEM_NOT_IN_ORDER: "Item not in your order", NETWORK: "Can't reach the server",
+  NAME_REQUIRED: "Name needed", CODE_REQUIRED: "Code needed"
+};
+var MESSAGES = {
+  INVALID_SESSION: "We don't recognise your session anymore. Reload the page to start a new one.",
+  RESTAURANT_NOT_FOUND: "That restaurant doesn't exist. Pick another one from the list.",
+  INVALID_CODE: "No group order matches that code. Check the code with your host and try again.",
+  GROUP_FULL: "This group order already has 10 people, so nobody else can join.",
+  ALREADY_JOINED: "You're already part of this group order.",
+  ORDER_LOCKED: "The host has locked this order. Items can't be changed anymore.",
+  ORDER_EXPIRED: "This group order expired after 2 hours of inactivity.",
+  ORDER_CHECKED_OUT: "This order has already been placed.",
+  INVALID_QUANTITY: "A quantity must be from 1 to 9, and you can have at most 9 of the same item.",
+  ITEM_NOT_ON_MENU: "That item isn't on this restaurant's menu.",
+  NOT_ALLOWED: "You can only change your own items, and only people in this group can see it.",
+  NOT_HOST: "Only the host, the person who created the group order, can do that.",
+  EMPTY_PARTICIPANT: "Everyone needs at least one item before the order can be locked.",
+  NOT_LOCKED: "Lock the group order first, then check out.",
+  RESTAURANT_CLOSED: "The restaurant is closed right now. Try again during opening hours (shown in UTC).",
+  INVALID_ADDRESS: "Enter a delivery address so we know where to send the order.",
+  ITEM_NOT_IN_ORDER: "That item is no longer in your order. Refresh to see the latest.",
+  NETWORK: "Could not reach the server. Check your connection and try again.",
+  NAME_REQUIRED: "Enter your name first so your friends can see who you are.",
+  CODE_REQUIRED: "Enter the share code your friend gave you to join their group order."
+};
+
+var state = { token: null, restaurants: [], code: null, participantId: null, restaurantId: null, menu: [], summary: null, isOpen: false };
+var busy = false;          // a user action is running
+var polling = false;       // a background refresh is running
+var pollTimer = null;
+var lastPollError = null;  // so the same background error is not shown again every 4 seconds
+var lastSummaryJson = null;
+var errorReturnKey = "";
+var errorQueue = [];     // errors that arrived while another error popup was open
+var errorDialog = byId("error-dialog");
+var receiptDialog = byId("receipt-dialog");
+
+function byId(id) { return document.getElementById(id); }
+
+// Builds an element. The text is always set with textContent, never as HTML.
+function make(tag, text, className) {
+  var node = document.createElement(tag);
+  if (text !== undefined) {
+    node.textContent = text;
+  }
+  if (className) {
+    node.className = className;
+  }
+  return node;
+}
+
+// Display only: turns whole cents into dollars with integer arithmetic.
+function formatMoney(cents) {
+  if (!Number.isInteger(cents)) {
+    return "n/a";
+  }
+  var sign = cents < 0 ? "-" : "";
+  var abs = Math.abs(cents);
+  var rest = abs % 100;
+  var dollars = (abs - rest) / 100;
+  return sign + "$" + dollars + "." + (rest < 10 ? "0" : "") + rest;
+}
+
+function reducedMotion() { return window.matchMedia("(prefers-reduced-motion: reduce)").matches; }
+
+class ApiError extends Error {
+  constructor(code, serverMessage) {
+    super(serverMessage || code);
+    this.code = code;
+    this.serverMessage = serverMessage || "";
+  }
+}
+
+// ------------------------------------------------------------------- API
+
+async function api(method, path, body) {
+  var headers = {};
+  if (state.token) {
+    headers["X-Session-Token"] = state.token;
+  }
+  var options = { method: method, headers: headers };
+  if (body !== undefined) {
+    headers["Content-Type"] = "application/json";
+    options.body = JSON.stringify(body);
+  }
+  var response;
+  try {
+    response = await fetch(path, options);
+  } catch (networkError) {
+    throw new ApiError("NETWORK", "");
+  }
+  if (response.status === 204) {
+    return null;
+  }
+  var data = null;
+  try {
+    data = await response.json();
+  } catch (parseError) {
+    data = null;
+  }
+  if (!response.ok) {
+    var failure = data && data.error ? data.error : {};
+    throw new ApiError(failure.code || "UNKNOWN", failure.message || "");
+  }
+  return data;
+}
+
+function groupPath() { return "/group-orders/" + encodeURIComponent(state.code); }
+function itemPath(menuItemId) {
+  return groupPath() + "/participants/" + state.participantId + "/items/" + menuItemId;
+}
+
+// ------------------------------------------------------- toasts and dialogs
+
+function toast(text) {
+  var node = make("div", text, "toast");
+  byId("toast-region").appendChild(node);
+  void node.offsetWidth; // lets the fade-in start from opacity 0
+  node.classList.add("show");
+  setTimeout(() => dismissToast(node), TOAST_MS);
+}
+function dismissToast(node) {
+  node.classList.remove("show");
+  setTimeout(() => node.remove(), reducedMotion() ? 0 : 200);
+}
+function focusKeyOf(element) {
+  return element ? element.dataset.focusKey || element.id || "" : "";
+}
+
+// Puts focus back on the control that started something, even if the page was redrawn since.
+function focusByKey(key) {
+  var target = key ? document.querySelector('[data-focus-key="' + key + '"]') || document.getElementById(key) : null;
+  if (target && !target.disabled && !target.closest("[hidden]")) {
+    target.focus();
+  } else {
+    byId("main").focus();
+  }
+}
+
+function showErrorDialog(code, serverMessage, focusKey) {
+  if (errorDialog.open) {
+    errorQueue.push([code, serverMessage, focusKey]); // one error popup at a time
+    return;
+  }
+  var known = Object.prototype.hasOwnProperty.call(MESSAGES, code);
+  byId("error-title").textContent = known ? TITLES[code] : GENERIC_TITLE;
+  byId("error-text").textContent = known ? MESSAGES[code] : GENERIC_MESSAGE + " (" + code + ")";
+  var detail = byId("error-detail");
+  detail.hidden = true;
+  if (code === "EMPTY_PARTICIPANT") {
+    var marker = "Missing: "; // the server ends its message with the names: "... Missing: Bo, Cy."
+    var at = serverMessage.indexOf(marker);
+    if (at >= 0) {
+      detail.textContent = "Still waiting on: " + serverMessage.slice(at + marker.length).replace(/\.$/, "") + ".";
+      detail.hidden = false;
+    }
+  }
+  errorReturnKey = focusKey || focusKeyOf(document.activeElement);
+  errorDialog.showModal();
+}
+
+function handleError(error, button) {
+  var key = focusKeyOf(button || document.activeElement);
+  if (error instanceof ApiError) {
+    showErrorDialog(error.code, error.serverMessage, key);
+    if (error.code === "INVALID_SESSION") {
+      sessionStorage.removeItem(TOKEN_KEY);
+      sessionStorage.removeItem(GROUP_KEY);
+      stopPolling();
+    }
+  } else {
+    showErrorDialog("UNKNOWN", "", key);
+  }
+}
+
+errorDialog.addEventListener("close", function () {
+  focusByKey(errorReturnKey);
+  var next = errorQueue.shift();
+  if (next) {
+    showErrorDialog(next[0], next[1], next[2]);
+  }
+});
+receiptDialog.addEventListener("close", function () { focusByKey("view-receipt-button"); });
+byId("error-ok").addEventListener("click", function () { errorDialog.close(); });
+byId("receipt-close").addEventListener("click", function () { receiptDialog.close(); });
+
+function showReceipt(summary) {
+  var me = summary.participants.find(function (p) { return p.participant_id === summary.you.participant_id; });
+  var groupTotal = 0;
+  summary.participants.forEach(function (p) { groupTotal += p.total_cents; });
+  byId("receipt-order-id").textContent = "#" + summary.order_id;
+  byId("receipt-restaurant").textContent = summary.restaurant_name;
+  var lines = byId("receipt-lines");
+  lines.replaceChildren();
+  me.items.forEach(function (item) {
+    var line = make("li", undefined, "receipt-row");
+    line.append(make("span", item.name + " \u00D7 " + item.quantity), make("span", formatMoney(item.line_total_cents)));
+    lines.appendChild(line);
+  });
+  if (me.items.length === 0) {
+    lines.appendChild(make("li", "You did not order any items.", "muted"));
+  }
+  byId("receipt-subtotal").textContent = formatMoney(me.subtotal_cents);
+  byId("receipt-fee").textContent = formatMoney(me.fee_share_cents);
+  byId("receipt-total").textContent = formatMoney(me.total_cents);
+  byId("receipt-group-total").textContent = formatMoney(groupTotal);
+  if (!receiptDialog.open) {
+    receiptDialog.showModal();
+  }
+}
+
+// ----------------------------------------------------------- user actions
+
+// Runs one user action at a time. The button that started it shows a spinner and is disabled meanwhile.
+async function run(action, button) {
+  if (busy) {
+    return;
+  }
+  busy = true;
+  if (button) {
+    button.classList.add("is-loading");
+    button.setAttribute("aria-busy", "true");
+    button.disabled = true;
+  }
+  try {
+    await action();
+  } catch (error) {
+    handleError(error, button);
+  } finally {
+    busy = false;
+    if (button) {
+      button.classList.remove("is-loading");
+      button.removeAttribute("aria-busy");
+      button.disabled = false;
+    }
+    applyControls();
+  }
+}
+
+function makeButton(text, className, key, label, onClick) {
+  var button = document.createElement("button");
+  button.type = "button";
+  button.className = "btn " + className;
+  button.textContent = text;
+  button.dataset.focusKey = key;
+  if (label) {
+    button.setAttribute("aria-label", label);
+  }
+  button.addEventListener("click", function () { onClick(button); });
+  return button;
+}
+
+// A - [n] + control. Its value stays between MIN_QUANTITY and MAX_QUANTITY.
+function makeStepper(start, itemName) {
+  var current = start;
+  var box = make("span", undefined, "stepper quantity-stepper");
+  var value = make("output", String(current));
+  var minus = makeButton("\u2212", "js-step", "", "Decrease quantity of " + itemName, function () { change(-1); });
+  var plus = makeButton("+", "js-step", "", "Increase quantity of " + itemName, function () { change(1); });
+  value.setAttribute("aria-label", "Quantity of " + itemName);
+  function change(step) {
+    current = Math.max(MIN_QUANTITY, Math.min(MAX_QUANTITY, current + step));
+    value.textContent = String(current);
+    box.sync();
+  }
+  box.sync = function () {
+    minus.disabled = !state.isOpen || current <= MIN_QUANTITY;
+    plus.disabled = !state.isOpen || current >= MAX_QUANTITY;
+  };
+  box.value = function () { return current; };
+  box.reset = function () { current = MIN_QUANTITY; value.textContent = String(current); box.sync(); };
+  box.append(minus, value, plus);
+  return box;
+}
+
+async function addItem(item, stepper) {
+  await api("POST", groupPath() + "/participants/" + state.participantId + "/items", { menu_item_id: item.id, quantity: stepper.value() });
+  stepper.reset();
+  await refreshSummary("action");
+  toast("Item added");
+}
+async function changeItem(menuItemId, quantity) {
+  await api("PATCH", itemPath(menuItemId), { quantity: quantity });
+  await refreshSummary("action");
+  toast("Quantity updated");
+}
+async function removeItem(menuItemId) {
+  await api("DELETE", itemPath(menuItemId));
+  await refreshSummary("action");
+  toast("Item removed");
+}
+async function lockGroup() {
+  await api("POST", groupPath() + "/lock");
+  await refreshSummary("lock");
+}
+
+async function checkout() {
+  await api("POST", groupPath() + "/checkout", { address: byId("address-input").value });
+  await refreshSummary("action"); // the summary now has the order id, which opens the receipt
+}
+
+async function createGroup() {
+  var name = byId("display-name").value.trim();
+  if (!name) {
+    showErrorDialog("NAME_REQUIRED", "", "create-button");
+    return;
+  }
+  var restaurantId = Number(byId("restaurant-select").value);
+  var created = await api("POST", "/group-orders", { restaurant_id: restaurantId, display_name: name });
+  await enterGroup(created.code);
+}
+
+async function joinGroup() {
+  var name = byId("display-name").value.trim();
+  var code = byId("share-code-input").value.trim();
+  if (!name || !code) {
+    showErrorDialog(name ? "CODE_REQUIRED" : "NAME_REQUIRED", "", "join-button");
+    return;
+  }
+  await api("POST", "/group-orders/" + encodeURIComponent(code) + "/join", { display_name: name });
+  await enterGroup(code);
+}
+
+async function copyCode(button) {
+  var copied = false;
+  try {
+    await navigator.clipboard.writeText(state.code);
+    copied = true;
+  } catch (clipboardError) {
+    var range = document.createRange();
+    range.selectNodeContents(byId("share-code"));
+    window.getSelection().removeAllRanges();
+    window.getSelection().addRange(range);
+    copied = document.execCommand("copy");
+  }
+  if (copied) {
+    button.textContent = "Copied";
+    toast("Copied");
+    setTimeout(() => { button.textContent = "Copy"; }, TOAST_MS);
+  } else {
+    toast("Select the code and copy it by hand");
+  }
+}
+
+// ------------------------------------------------------------- rendering
+
+function menuItem(menuItemId) {
+  return state.menu.find(function (item) { return item.id === menuItemId; });
+}
+
+function renderMenu() {
+  var list = byId("menu-list");
+  list.replaceChildren();
+  if (state.menu.length === 0) {
+    list.appendChild(make("li", "This restaurant has no menu items yet.", "empty"));
+  }
+  state.menu.forEach(function (item) {
+    var card = make("li", undefined, "menu-card");
+    var info = make("div", undefined, "item-info");
+    info.append(make("strong", item.name), make("span", formatMoney(item.price_cents), "muted"));
+    var stepper = makeStepper(1, item.name);
+    var add = makeButton("Add", "btn-primary js-mutating add-item-button", "add-" + item.id, "Add " + item.name + " to my order",
+      function (button) { run(function () { return addItem(item, stepper); }, button); });
+    card.append(info, stepper, add);
+    list.appendChild(card);
+  });
+}
+
+function renderMyItems(entry) {
+  var list = byId("my-items");
+  list.replaceChildren();
+  var items = entry ? entry.items : [];
+  if (items.length === 0) {
+    list.appendChild(make("li", "No items yet. Add something from the menu.", "empty"));
+    return;
+  }
+  items.forEach(function (item) {
+    var line = make("li", undefined, "line");
+    var info = make("div", undefined, "item-info");
+    var listed = menuItem(item.menu_item_id);
+    info.append(make("strong", item.name), make("span", formatMoney(item.line_total_cents) + (listed ? " (" + formatMoney(listed.price_cents) + " each)" : ""), "muted"));
+    var stepper = makeStepper(item.quantity, item.name);
+    var change = makeButton("Change quantity", "js-mutating change-quantity-button", "change-" + item.menu_item_id,
+      "Change quantity of " + item.name, function (button) { run(function () { return changeItem(item.menu_item_id, stepper.value()); }, button); });
+    var remove = makeButton("Remove", "btn-danger js-mutating remove-item-button", "remove-" + item.menu_item_id,
+      "Remove " + item.name, function (button) { run(function () { return removeItem(item.menu_item_id); }, button); });
+    line.append(info, stepper, change, remove);
+    list.appendChild(line);
+  });
+}
+
+function renderSummary(summary) {
+  var body = byId("summary-body");
+  var foot = byId("summary-foot");
+  body.replaceChildren();
+  foot.replaceChildren();
+  if (summary.participants.length === 0) {
+    var none = make("td", "Nobody has joined yet.");
+    none.colSpan = 4;
+    body.appendChild(make("tr")).appendChild(none);
+  }
+  var sums = [0, 0, 0];
+  summary.participants.forEach(function (entry) {
+    var isMe = entry.participant_id === summary.you.participant_id;
+    var row = make("tr", undefined, isMe ? "me" : "");
+    row.appendChild(make("td", entry.display_name + (isMe ? " (you)" : "")));
+    [entry.subtotal_cents, entry.fee_share_cents, entry.total_cents].forEach(function (cents, i) {
+      sums[i] += cents;
+      row.appendChild(make("td", formatMoney(cents), "money"));
+    });
+    body.appendChild(row);
+  });
+  var total = make("tr");
+  total.appendChild(make("th", "Group total")).scope = "row";
+  sums.forEach(function (cents) { total.appendChild(make("td", formatMoney(cents), "money")); });
+  foot.appendChild(total);
+}
+
+function renderStatus(summary) {
+  var info = STATUS[summary.status];
+  var badge = byId("status-badge");
+  badge.className = "badge badge-" + info.cls;
+  badge.replaceChildren(make("span", info.symbol), make("span", info.label));
+  badge.firstChild.setAttribute("aria-hidden", "true");
+  byId("status-note").textContent = info.note;
+  byId("delivery-fee").textContent = formatMoney(summary.delivery_fee_cents);
+  byId("restaurant-name").textContent = summary.restaurant_name;
+  var restaurant = state.restaurants.find(function (r) { return r.id === summary.restaurant_id; });
+  byId("restaurant-meta").textContent = restaurant ? restaurant.cuisine + " \u00B7 open " + restaurant.opens_at + "-" + restaurant.closes_at + " UTC" : "";
+  var done = summary.status === "CHECKED_OUT" && summary.order_id !== null;
+  byId("order-result").hidden = !done;
+  byId("order-result-text").textContent = done ? "Order #" + summary.order_id + " has been placed." : "";
+}
+
+// Read-only unless the order is open; only the host sees the lock and checkout controls.
+function applyControls() {
+  var summary = state.summary;
+  if (!summary) {
+    return;
+  }
+  state.isOpen = summary.status === "OPEN";
+  document.querySelectorAll(".js-mutating").forEach(function (el) { el.disabled = !state.isOpen || el.classList.contains("is-loading"); });
+  document.querySelectorAll(".quantity-stepper").forEach(function (el) { el.sync(); });
+  byId("host-controls").hidden = !summary.you.is_host;
+  byId("lock-button").disabled = !state.isOpen || byId("lock-button").classList.contains("is-loading");
+  byId("checkout-button").disabled = summary.status !== "LOCKED" || byId("checkout-button").classList.contains("is-loading");
+  byId("address-input").disabled = summary.status !== "LOCKED";
+}
+
+function applySummary(summary, source) {
+  var previous = state.summary ? state.summary.status : null;
+  var json = JSON.stringify(summary);
+  var changed = json !== lastSummaryJson;
+  lastSummaryJson = json;
+  state.summary = summary;
+  state.participantId = summary.you.participant_id; // the server says who I am
+  if (changed) {
+    renderStatus(summary);
+    renderSummary(summary);
+    renderMyItems(summary.participants.find(function (p) { return p.participant_id === summary.you.participant_id; }));
+  }
+  applyControls();
+
+  if (previous === "OPEN" && summary.status === "LOCKED") {
+    toast(source === "lock" ? "Order locked" : "The host locked the order");
+  }
+  var expiredShown = sessionStorage.getItem(EXPIRED_KEY + state.code) !== null;
+  if (summary.status === "EXPIRED" && !expiredShown) {
+    sessionStorage.setItem(EXPIRED_KEY + state.code, "1"); // the expired dialog shows once
+    showErrorDialog("ORDER_EXPIRED", "", focusKeyOf(document.activeElement));
+  }
+  if (summary.status === "CHECKED_OUT" && summary.order_id !== null) {
+    var receiptKey = RECEIPT_KEY + state.code + "." + summary.order_id;
+    if (!sessionStorage.getItem(receiptKey)) {
+      sessionStorage.setItem(receiptKey, "1"); // once per order per tab, whoever clicked Checkout
+      showReceipt(summary);
+    }
+  }
+  if (TERMINAL.indexOf(summary.status) >= 0) {
+    stopPolling();
+  }
+}
+
+async function refreshSummary(source) {
+  var summary = await api("GET", groupPath() + "/summary");
+  applySummary(summary, source);
+  return summary;
+}
+
+// ----------------------------------------------------------- live updates
+
+function canPoll() {
+  var done = state.summary && TERMINAL.indexOf(state.summary.status) >= 0;
+  return Boolean(state.code) && !byId("group-screen").hidden && !document.hidden && !done;
+}
+
+function startPolling() {
+  stopPolling();
+  if (canPoll()) {
+    pollTimer = setTimeout(pollOnce, POLL_MS);
+  }
+}
+function stopPolling() { clearTimeout(pollTimer); pollTimer = null; }
+
+async function pollOnce() {
+  pollTimer = null;
+  if (!canPoll()) {
+    return;
+  }
+  if (!busy && !polling) {
+    polling = true;
+    try {
+      await refreshSummary("poll");
+      lastPollError = null;
+    } catch (error) {
+      var code = error instanceof ApiError ? error.code : "UNKNOWN";
+      if (code !== lastPollError && !errorDialog.open) {
+        lastPollError = code;
+        handleError(error, null);
+      }
+    } finally {
+      polling = false;
+    }
+  }
+  startPolling();
+}
+
+document.addEventListener("visibilitychange", function () {
+  if (document.hidden) {
+    stopPolling();
+  } else if (canPoll()) {
+    pollOnce(); // refresh right away when the tab is visible again
+  }
+});
+
+// ------------------------------------------------------------------ start
+
+async function enterGroup(code) {
+  state.code = code;
+  try {
+    var summary = await api("GET", groupPath() + "/summary");
+    state.restaurantId = summary.restaurant_id;
+    state.menu = await api("GET", "/restaurants/" + summary.restaurant_id + "/menu");
+  } catch (error) {
+    state.code = null;
+    sessionStorage.removeItem(GROUP_KEY);
+    throw error;
+  }
+  sessionStorage.setItem(GROUP_KEY, code);
+  byId("start-screen").hidden = true;
+  byId("group-screen").hidden = false;
+  byId("code-chip").hidden = false;
+  byId("share-code").textContent = code;
+  byId("share-code").setAttribute("aria-label", "Share code " + code.split("").join(" "));
+  renderMenu();
+  lastSummaryJson = state.summary = null;
+  applySummary(summary, "enter");
+  byId("restaurant-name").focus();
+  startPolling();
+}
+
+async function loadSession() {
+  var stored = sessionStorage.getItem(TOKEN_KEY);
+  if (stored) {
+    state.token = stored;
+    return;
+  }
+  var created = await api("POST", "/sessions");
+  state.token = created.token;
+  sessionStorage.setItem(TOKEN_KEY, state.token);
+}
+
+async function start() {
+  await loadSession();
+  state.restaurants = await api("GET", "/restaurants");
+  var select = byId("restaurant-select");
+  select.replaceChildren();
+  state.restaurants.forEach(function (restaurant) {
+    var option = make("option", restaurant.name + " (" + restaurant.cuisine + ", " + restaurant.opens_at + "-" + restaurant.closes_at + " UTC)");
+    option.value = String(restaurant.id);
+    select.appendChild(option);
+  });
+  var saved = sessionStorage.getItem(GROUP_KEY);
+  if (saved) {
+    await enterGroup(saved);
+  }
+}
+
+byId("create-button").addEventListener("click", function () { run(createGroup, this); });
+byId("join-button").addEventListener("click", function () { run(joinGroup, this); });
+byId("refresh-button").addEventListener("click", function () { run(function () { return refreshSummary("refresh"); }, this); });
+byId("lock-button").addEventListener("click", function () { run(lockGroup, this); });
+byId("checkout-button").addEventListener("click", function () { run(checkout, this); });
+byId("copy-button").addEventListener("click", function () { copyCode(this); });
+byId("view-receipt-button").addEventListener("click", function () { showReceipt(state.summary); });
+
+run(start);
+</script>
+</body>
+</html>
