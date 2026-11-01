@@ -20,6 +20,8 @@ EXPIRED = "EXPIRED"
 CHECKED_OUT = "CHECKED_OUT"
 
 MAX_PARTICIPANTS = 10
+MIN_QUANTITY = 1
+MAX_QUANTITY = 9
 DEFAULT_TTL = timedelta(hours=2)
 CREATE_ATTEMPTS = 10
 
@@ -108,6 +110,55 @@ class GroupOrderService:
             raise rejection
         return participant
 
+    # ---------------------------------------------------- items (R13-R17, R28)
+
+    def add_item(self, token: str | None, code: str, participant_id: int, menu_item_id: int, quantity: int) -> dict:
+        """Add `quantity` of a menu item for a participant. Adding an item they
+        already have increases its quantity. Returns the stored item.
+        """
+        return self._edit_item("add", token, code, participant_id, menu_item_id, quantity)
+
+    def change_item(
+        self, token: str | None, code: str, participant_id: int, menu_item_id: int, quantity: int
+    ) -> dict:
+        """Set the quantity of an item the participant already has. Returns the stored item."""
+        return self._edit_item("change", token, code, participant_id, menu_item_id, quantity)
+
+    def remove_item(self, token: str | None, code: str, participant_id: int, menu_item_id: int) -> None:
+        """Remove an item the participant has."""
+        self._edit_item("remove", token, code, participant_id, menu_item_id, None)
+
+    def _edit_item(
+        self,
+        action: str,
+        token: str | None,
+        code: str,
+        participant_id: int,
+        menu_item_id: int,
+        quantity: int | None,
+    ) -> dict | None:
+        self._require_session(token)
+
+        def attempt(group: dict) -> tuple[MiniDashError | None, dict | None]:
+            # Runs inside the repository's lock, like join: checks and change are one step.
+            now = self._now()
+            self._expire_if_inactive(group)  # R31, may change group["status"]
+            rejection = self._item_rejection(group, action, token, participant_id, menu_item_id, quantity)
+            if rejection is not None:
+                return rejection, None  # returned, not raised, so a saved EXPIRED survives
+
+            result = self._apply_item_change(group, action, participant_id, menu_item_id, quantity)
+            group["last_activity_at"] = now  # a successful add, change or remove is activity (R30)
+            return None, result
+
+        try:
+            rejection, result = self._groups.update_group_order(code, attempt)
+        except GroupOrderNotFoundError:
+            raise MiniDashError(errors.INVALID_CODE, "No group order matches this code.") from None
+        if rejection is not None:
+            raise rejection
+        return result
+
     # ------------------------------------------------------------------ helpers
 
     def _now(self) -> str:
@@ -125,16 +176,25 @@ class GroupOrderService:
         if group["status"] in (OPEN, LOCKED) and self._inactive_too_long(group):
             group["status"] = EXPIRED
 
-    def _join_rejection(self, group: dict, token: str) -> MiniDashError | None:
-        """The error a join must be rejected with, or None. Checked in the order
-        ORDER_EXPIRED, ORDER_CHECKED_OUT, ORDER_LOCKED, ALREADY_JOINED, GROUP_FULL.
+    def _status_rejection(self, group: dict) -> MiniDashError | None:
+        """The error for a group that is no longer open to changes, or None.
+        Checked in the order ORDER_EXPIRED (R32), ORDER_CHECKED_OUT, ORDER_LOCKED (R10, R28).
         """
         if group["status"] == EXPIRED:
-            return MiniDashError(errors.ORDER_EXPIRED, "This group order has expired.")  # R32
+            return MiniDashError(errors.ORDER_EXPIRED, "This group order has expired.")
         if group["status"] == CHECKED_OUT:
             return MiniDashError(errors.ORDER_CHECKED_OUT, "This group order has already been checked out.")
         if group["status"] == LOCKED:
             return MiniDashError(errors.ORDER_LOCKED, "This group order is locked.")
+        return None
+
+    def _join_rejection(self, group: dict, token: str) -> MiniDashError | None:
+        """The error a join must be rejected with, or None. Checked in the order
+        ORDER_EXPIRED, ORDER_CHECKED_OUT, ORDER_LOCKED, ALREADY_JOINED, GROUP_FULL.
+        """
+        rejection = self._status_rejection(group)
+        if rejection is not None:
+            return rejection
         if any(p["token"] == token for p in group["participants"]):
             return MiniDashError(errors.ALREADY_JOINED, "You have already joined this group order.")
         if len(group["participants"]) >= MAX_PARTICIPANTS:
@@ -142,6 +202,77 @@ class GroupOrderService:
                 errors.GROUP_FULL, f"A group order can have at most {MAX_PARTICIPANTS} participants."
             )
         return None
+
+    def _item_rejection(
+        self,
+        group: dict,
+        action: str,
+        token: str,
+        participant_id: int,
+        menu_item_id: int,
+        quantity: int | None,
+    ) -> MiniDashError | None:
+        """The error an add, change or remove must be rejected with, or None. Checked in the order
+        ORDER_EXPIRED, ORDER_CHECKED_OUT, ORDER_LOCKED, NOT_ALLOWED, INVALID_QUANTITY,
+        ITEM_NOT_ON_MENU, then (change and remove only) ITEM_NOT_IN_ORDER.
+        """
+        rejection = self._status_rejection(group)
+        if rejection is not None:
+            return rejection
+
+        # R17: the caller may only act for their own participant_id.
+        # R18: the exception is the host, who may also REMOVE any participant's item
+        # (not add or change it). The person must still be a participant of this group.
+        owner = next((p for p in group["participants"] if p["participant_id"] == participant_id), None)
+        is_own_item = owner is not None and owner["token"] == token
+        host_removing = action == "remove" and owner is not None and token == group["host_token"]
+        if not (is_own_item or host_removing):
+            return MiniDashError(
+                errors.NOT_ALLOWED,
+                "You can only change your own items. Only the host can remove other people's items.",
+            )
+
+        existing = _find_item(group, participant_id, menu_item_id)
+
+        if action != "remove":  # R14
+            # Adding increases what they already have, so the total must stay in range too.
+            already_have = existing["quantity"] if action == "add" and existing else 0
+            if (
+                not _is_whole_number(quantity)
+                or not MIN_QUANTITY <= quantity <= MAX_QUANTITY
+                or already_have + quantity > MAX_QUANTITY
+            ):
+                return MiniDashError(
+                    errors.INVALID_QUANTITY,
+                    f"Quantity must be a whole number from {MIN_QUANTITY} to {MAX_QUANTITY}, "
+                    f"including what you already have of this item.",
+                )
+
+        menu_ids = {item["id"] for item in self._restaurants.list_menu(group["restaurant_id"])}
+        if menu_item_id not in menu_ids:  # R15
+            return MiniDashError(errors.ITEM_NOT_ON_MENU, f"Menu item {menu_item_id} is not on this menu.")
+
+        if action != "add" and existing is None:
+            return MiniDashError(errors.ITEM_NOT_IN_ORDER, f"You have no item {menu_item_id} in this order.")
+        return None
+
+    def _apply_item_change(
+        self, group: dict, action: str, participant_id: int, menu_item_id: int, quantity: int | None
+    ) -> dict | None:
+        """Make the change to the loaded group (only called once every check has passed)."""
+        existing = _find_item(group, participant_id, menu_item_id)
+        if action == "remove":
+            group["items"].remove(existing)
+            return None
+        if action == "change":
+            existing["quantity"] = quantity
+            return dict(existing)
+        if existing is not None:  # add to an item they already have
+            existing["quantity"] += quantity
+            return dict(existing)
+        item = {"participant_id": participant_id, "menu_item_id": menu_item_id, "quantity": quantity}
+        group["items"].append(item)
+        return dict(item)
 
     def _inactive_too_long(self, group: dict) -> bool:
         # ActivityTimer starts counting when it is created, so build it "at" the
@@ -151,6 +282,18 @@ class GroupOrderService:
         timer = ActivityTimer(_FixedClock(last_activity), self._ttl)
         timer.clock = self._clock
         return timer.is_expired()
+
+
+def _is_whole_number(value: object) -> bool:
+    # bool is a subclass of int, so True would otherwise count as 1.
+    return type(value) is int
+
+
+def _find_item(group: dict, participant_id: int, menu_item_id: int) -> dict | None:
+    for item in group["items"]:
+        if item["participant_id"] == participant_id and item["menu_item_id"] == menu_item_id:
+            return item
+    return None
 
 
 class _FixedClock:
