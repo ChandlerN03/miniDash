@@ -1,7 +1,7 @@
 import copy
 import secrets
 import uuid
-from datetime import datetime, timedelta
+from datetime import datetime, time, timedelta, timezone
 
 from src.clock import Clock
 from src.repository.group_orders_repo import (
@@ -14,6 +14,7 @@ from src.services import errors
 from src.services.activity_timer import ActivityTimer
 from src.services.errors import MiniDashError
 from src.services.fee_split import split_evenly
+from src.services.order_service import OrderService
 from src.services.share_code import generate_share_code
 
 DELIVERY_FEE_CENTS = 499  # R21: one fixed delivery fee for every group order, in integer cents
@@ -50,11 +51,13 @@ class GroupOrderService:
         restaurants: RestaurantRepository,
         clock: Clock,
         ttl: timedelta = DEFAULT_TTL,
+        orders: OrderService | None = None,
     ):
         self._groups = groups
         self._restaurants = restaurants
         self._clock = clock
         self._ttl = ttl
+        self._orders = orders  # only needed for checkout
 
     # ------------------------------------------------------------ sessions (R1)
 
@@ -266,6 +269,74 @@ class GroupOrderService:
             return EmptyParticipantError(empty)
         return None
 
+    # ------------------------------------------------------- checkout (R33-R37)
+
+    def checkout(self, token: str | None, code: str, address: str) -> dict:
+        """The host turns a LOCKED group into one normal MiniDash order.
+
+        The order is created through the existing order service, inside the same
+        atomic update that marks the group CHECKED_OUT. If anything fails, no
+        order is kept and the group stays LOCKED (R38); two checkouts at once
+        cannot create two orders (R37).
+        """
+        if self._orders is None:
+            raise RuntimeError("GroupOrderService needs an order service to check out (pass orders=...).")
+        self._require_session(token)
+
+        def attempt(group: dict) -> tuple[MiniDashError | None, dict | None]:
+            self._expire_if_inactive(group)  # R31, may change group["status"]
+            rejection = self._checkout_rejection(group, token, address)
+            if rejection is not None:
+                return rejection, None  # returned, not raised, so a saved EXPIRED survives
+
+            order = self._orders.create_order(
+                group["restaurant_id"],
+                address,
+                _merged_order_lines(group),
+                delivery_fee_cents=DELIVERY_FEE_CENTS,
+            )
+            group["status"] = CHECKED_OUT
+            group["order_id"] = order["id"]
+            return None, {"order_id": order["id"], "status": CHECKED_OUT, "total_cents": order["total_cents"]}
+
+        return self._update_group(code, attempt)
+
+    def _checkout_rejection(self, group: dict, token: str, address: object) -> MiniDashError | None:
+        """The error a checkout must be rejected with, or None. Checked in the order
+        ORDER_EXPIRED, ORDER_CHECKED_OUT, NOT_HOST, NOT_LOCKED, RESTAURANT_CLOSED, INVALID_ADDRESS.
+        """
+        if group["status"] == EXPIRED:  # R32
+            return MiniDashError(errors.ORDER_EXPIRED, "This group order has expired.")
+        if group["status"] == CHECKED_OUT:  # R37
+            return MiniDashError(errors.ORDER_CHECKED_OUT, "This group order has already been checked out.")
+        if token != group["host_token"]:  # R27
+            return MiniDashError(errors.NOT_HOST, "Only the host can check out the group order.")
+        if group["status"] != LOCKED:  # R33
+            return MiniDashError(errors.NOT_LOCKED, "The group order must be locked before checkout.")
+
+        restaurant = self._restaurants.get_restaurant(group["restaurant_id"])
+        if restaurant is None:
+            return MiniDashError(errors.RESTAURANT_NOT_FOUND, "The restaurant does not exist.")
+        if not self._is_open(restaurant):  # R34
+            return MiniDashError(
+                errors.RESTAURANT_CLOSED,
+                f"The restaurant is open from {restaurant['opens_at']} to {restaurant['closes_at']} (UTC).",
+            )
+
+        if not isinstance(address, str) or not address.strip():  # R35
+            return MiniDashError(errors.INVALID_ADDRESS, "A delivery address is required.")
+        return None
+
+    def _is_open(self, restaurant: dict) -> bool:
+        """Open from opens_at up to, but not including, closes_at, in UTC.
+
+        The hours are "HH:MM" strings without a timezone, so they are compared with
+        the injected clock's time in UTC. Hours that run past midnight (closes_at not
+        after opens_at) are not supported and count as always closed.
+        """
+        now = self._clock.now().astimezone(timezone.utc).time()
+        return time.fromisoformat(restaurant["opens_at"]) <= now < time.fromisoformat(restaurant["closes_at"])
+
     # ------------------------------------------------------------------ helpers
 
     def _update_group(self, code: str, attempt) -> object:
@@ -406,6 +477,14 @@ class GroupOrderService:
 def _is_whole_number(value: object) -> bool:
     # bool is a subclass of int, so True would otherwise count as 1.
     return type(value) is int
+
+
+def _merged_order_lines(group: dict) -> list[dict]:
+    """Everyone's items as order lines: the same menu item is one line with the quantities added."""
+    quantities: dict[int, int] = {}
+    for item in group["items"]:
+        quantities[item["menu_item_id"]] = quantities.get(item["menu_item_id"], 0) + item["quantity"]
+    return [{"menu_item_id": menu_item_id, "quantity": quantity} for menu_item_id, quantity in quantities.items()]
 
 
 def _find_item(group: dict, participant_id: int, menu_item_id: int) -> dict | None:

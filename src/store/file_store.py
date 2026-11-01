@@ -17,6 +17,9 @@ class FileStore:
     def __init__(self, path: Path | str):
         self._path = Path(path)
         self._lock = threading.RLock()
+        # The data of the transaction that is open right now, or None. Only the thread
+        # holding the lock can see it as not None, so nested transactions share it.
+        self._open_data: dict | None = None
 
     def initialize(self, seed: dict) -> None:
         """Make sure the file has every collection in `seed`.
@@ -37,7 +40,12 @@ class FileStore:
                 self._write(data)
 
     def read(self) -> dict:
+        """A copy of the data. Inside a transaction (on the same thread) it includes
+        the changes made so far; from another thread it waits for the transaction to finish.
+        """
         with self._lock:
+            if self._open_data is not None:
+                return copy.deepcopy(self._open_data)
             return self._load()
 
     @contextmanager
@@ -46,11 +54,32 @@ class FileStore:
 
         The lock is held the whole time, so two requests cannot overwrite each
         other. If the caller raises, nothing is saved.
+
+        Transactions can be nested (for example an order created while a group
+        order is being updated). A nested transaction works on the same data as
+        the outer one, and only the outermost one writes the file, so nothing is
+        lost and everything is saved or nothing is. If a nested transaction
+        raises, its own changes are undone.
         """
         with self._lock:
+            if self._open_data is not None:
+                outer_data = self._open_data
+                before = copy.deepcopy(outer_data)
+                try:
+                    yield outer_data
+                except BaseException:
+                    outer_data.clear()
+                    outer_data.update(before)
+                    raise
+                return
+
             data = self._load()
-            yield data
-            self._write(data)
+            self._open_data = data
+            try:
+                yield data
+                self._write(data)
+            finally:
+                self._open_data = None
 
     def _load(self) -> dict:
         return json.loads(self._path.read_text())

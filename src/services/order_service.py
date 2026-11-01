@@ -30,8 +30,17 @@ class OrderService:
         self._restaurants = restaurants
         self._clock = clock
 
-    def create_order(self, restaurant_id: int, address: str, items: list[dict]) -> dict:
-        """Create an order. `items` is a list of {"menu_item_id", "quantity"}."""
+    def create_order(
+        self, restaurant_id: int, address: str, items: list[dict], delivery_fee_cents: int = 0
+    ) -> dict:
+        """Create an order. `items` is a list of {"menu_item_id", "quantity"}.
+
+        `delivery_fee_cents` (default 0) is added once to the order total. It is
+        not a line item and is not stored separately.
+        """
+        if type(delivery_fee_cents) is not int or delivery_fee_cents < 0:
+            raise ValueError("delivery_fee_cents must be a whole number of cents, 0 or more")
+
         if self._restaurants.get_restaurant(restaurant_id) is None:
             raise MiniDashError("RESTAURANT_NOT_FOUND", f"Restaurant {restaurant_id} does not exist.")
 
@@ -51,7 +60,7 @@ class OrderService:
 
         prices = {m["id"]: m["price_cents"] for m in self._restaurants.list_menu(restaurant_id)}
         order_items = []
-        total_cents = 0
+        total_cents = delivery_fee_cents
         for menu_item_id, quantity in quantities.items():
             if menu_item_id not in prices:
                 raise MiniDashError(

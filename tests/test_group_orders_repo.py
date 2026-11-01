@@ -646,3 +646,183 @@ def test_each_simultaneous_update_sees_the_previous_one(repo, clock):
         thread.join()
 
     assert sorted(seen_sizes) == list(range(1, total + 1))  # each saw a different, growing size
+
+
+# ----------------------------------------- FileStore transactions can be nested
+
+
+@pytest.fixture
+def store(data_file):
+    file_store_ = FileStore(data_file)
+    file_store_.initialize(SEED_DATA)
+    return file_store_
+
+
+def test_a_nested_transaction_changes_are_saved_with_the_outer_one(store, data_file):
+    with store.transaction() as outer:
+        outer["sessions"]["outer"] = {"created_at": None}
+        with store.transaction() as inner:
+            inner["sessions"]["inner"] = {"created_at": None}
+
+    assert set(read_file(data_file)["sessions"]) == {"outer", "inner"}
+
+
+def test_the_nested_transaction_works_on_the_same_data_as_the_outer_one(store):
+    with store.transaction() as outer:
+        with store.transaction() as inner:
+            inner["sessions"]["inner"] = {"created_at": None}
+        assert "inner" in outer["sessions"]  # the outer one sees the inner change immediately
+
+
+def test_a_nested_transaction_does_not_overwrite_the_inner_change(store, data_file, clock):
+    """The bug this fixes: an order created inside a group update used to be lost."""
+    orders = OrderRepository(store)
+    repo = GroupOrderRepository(store)
+    repo.create_group_order(make_group(clock))
+
+    def update(group):
+        orders.add(  # opens its own transaction inside the group update
+            restaurant_id=2,
+            status="PLACED",
+            total_cents=100,
+            address="5 Oak Ave",
+            created_at=clock.now().isoformat(),
+            items=[{"menu_item_id": 5, "quantity": 1, "unit_price_cents": 100}],
+        )
+        group["status"] = "CHECKED_OUT"
+
+    repo.update_group_order("Ab3dEf", update)
+
+    data = read_file(data_file)
+    assert len(data["orders"]) == 1
+    assert data["group_orders"]["Ab3dEf"]["status"] == "CHECKED_OUT"
+
+
+def test_nested_transactions_write_the_file_only_once(store, monkeypatch):
+    real_replace = file_store.os.replace
+    writes = []
+    monkeypatch.setattr(file_store.os, "replace", lambda *args: (writes.append(args), real_replace(*args))[1])
+
+    with store.transaction():
+        with store.transaction():
+            with store.transaction():
+                pass
+
+    assert len(writes) == 1
+
+
+def test_if_the_outer_transaction_fails_the_inner_change_is_not_saved_either(store, data_file):
+    before = data_file.read_text()
+
+    with pytest.raises(RuntimeError):
+        with store.transaction():
+            with store.transaction() as inner:
+                inner["sessions"]["inner"] = {"created_at": None}
+            raise RuntimeError("boom")
+
+    assert data_file.read_text() == before
+
+
+def test_if_the_inner_transaction_fails_nothing_is_saved_when_it_propagates(store, data_file):
+    before = data_file.read_text()
+
+    with pytest.raises(RuntimeError):
+        with store.transaction() as outer:
+            outer["sessions"]["outer"] = {"created_at": None}
+            with store.transaction() as inner:
+                inner["sessions"]["inner"] = {"created_at": None}
+                raise RuntimeError("boom")
+
+    assert data_file.read_text() == before
+
+
+def test_a_failed_inner_transaction_is_undone_even_if_the_outer_one_carries_on(store, data_file):
+    with store.transaction() as outer:
+        outer["sessions"]["before"] = {"created_at": None}
+        try:
+            with store.transaction() as inner:
+                inner["sessions"]["half-done"] = {"created_at": None}
+                inner["orders"].append({"id": 99})
+                raise RuntimeError("boom")
+        except RuntimeError:
+            pass
+        outer["sessions"]["after"] = {"created_at": None}
+
+    data = read_file(data_file)
+    assert set(data["sessions"]) == {"before", "after"}  # the failed inner change is gone
+    assert data["orders"] == []
+
+
+def test_the_store_works_normally_again_after_a_failed_transaction(store, data_file):
+    with pytest.raises(RuntimeError):
+        with store.transaction():
+            with store.transaction():
+                raise RuntimeError("boom")
+
+    with store.transaction() as data:  # must be a normal top-level transaction, not "nested"
+        data["sessions"]["later"] = {"created_at": None}
+
+    assert "later" in read_file(data_file)["sessions"]
+
+
+def test_reading_inside_a_transaction_sees_the_changes_made_so_far(store, data_file):
+    with store.transaction() as data:
+        data["sessions"]["draft"] = {"created_at": None}
+
+        assert "draft" in store.read()["sessions"]  # same thread: sees its own uncommitted change
+        assert "draft" not in read_file(data_file)["sessions"]  # but the file is not written yet
+
+
+def test_a_read_inside_a_transaction_is_a_copy(store):
+    with store.transaction() as data:
+        snapshot = store.read()
+        snapshot["sessions"]["scribble"] = {"created_at": None}
+
+        assert "scribble" not in data["sessions"]
+
+
+def test_reading_outside_a_transaction_sees_only_saved_data(store, data_file):
+    with pytest.raises(RuntimeError):
+        with store.transaction() as data:
+            data["sessions"]["draft"] = {"created_at": None}
+            raise RuntimeError("boom")
+
+    assert "draft" not in store.read()["sessions"]
+
+
+def test_another_thread_waits_for_a_transaction_and_then_sees_the_committed_data(store):
+    seen = []
+    reader = threading.Thread(target=lambda: seen.append(set(store.read()["sessions"])))
+
+    with store.transaction() as data:
+        data["sessions"]["draft"] = {"created_at": None}
+        reader.start()
+        reader.join(timeout=0.1)
+        assert reader.is_alive()  # blocked: it must not read half-finished data
+        with store.transaction() as inner:
+            inner["sessions"]["draft2"] = {"created_at": None}
+
+    reader.join(timeout=5)
+    assert seen == [{"draft", "draft2"}]
+
+
+def test_simultaneous_nested_transactions_do_not_lose_updates(store, data_file):
+    total = 12
+    barrier = threading.Barrier(total)
+
+    def add_session(number):
+        barrier.wait()
+        with store.transaction() as outer:
+            time.sleep(0.001)
+            with store.transaction() as inner:
+                inner["sessions"][f"s{number}"] = {"created_at": None}
+            outer["sessions"][f"t{number}"] = {"created_at": None}
+
+    threads = [threading.Thread(target=add_session, args=(n,)) for n in range(total)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    sessions = read_file(data_file)["sessions"]
+    assert {f"s{n}" for n in range(total)} | {f"t{n}" for n in range(total)} == set(sessions)
