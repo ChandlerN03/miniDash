@@ -1,3 +1,4 @@
+import copy
 import secrets
 import uuid
 from datetime import datetime, timedelta
@@ -12,7 +13,10 @@ from src.repository.restaurants_repo import RestaurantRepository
 from src.services import errors
 from src.services.activity_timer import ActivityTimer
 from src.services.errors import MiniDashError
+from src.services.fee_split import split_evenly
 from src.services.share_code import generate_share_code
+
+DELIVERY_FEE_CENTS = 499  # R21: one fixed delivery fee for every group order, in integer cents
 
 OPEN = "OPEN"
 LOCKED = "LOCKED"
@@ -24,6 +28,19 @@ MIN_QUANTITY = 1
 MAX_QUANTITY = 9
 DEFAULT_TTL = timedelta(hours=2)
 CREATE_ATTEMPTS = 10
+
+
+class EmptyParticipantError(MiniDashError):
+    """A lock was rejected because some participants have no items (R26).
+
+    `participants` lists them in join order as {"participant_id", "display_name"}.
+    The names are also in the message.
+    """
+
+    def __init__(self, participants: list[dict]):
+        names = ", ".join(p["display_name"] for p in participants)
+        super().__init__(errors.EMPTY_PARTICIPANT, f"Every participant needs at least one item. Missing: {names}.")
+        self.participants = participants
 
 
 class GroupOrderService:
@@ -159,7 +176,109 @@ class GroupOrderService:
             raise rejection
         return result
 
+    # ----------------------------------------------------------- summary (R20-R24)
+
+    def get_summary(self, token: str | None, code: str) -> dict:
+        """What each participant owes, in join order. Any participant may read it.
+
+        Reading is not activity (R30) and writes nothing, except that expiry
+        (R31) is still applied: an inactive group is saved as EXPIRED and the
+        summary is returned with that status instead of being rejected.
+        """
+        self._require_session(token)
+        group = self._groups.get_group_order(code)
+        if group is None:
+            raise MiniDashError(errors.INVALID_CODE, "No group order matches this code.")
+
+        if group["status"] in (OPEN, LOCKED) and self._inactive_too_long(group):
+            def expire(stored: dict) -> dict:
+                self._expire_if_inactive(stored)  # re-checked inside the lock
+                return copy.deepcopy(stored)
+
+            try:
+                group = self._groups.update_group_order(code, expire)
+            except GroupOrderNotFoundError:
+                raise MiniDashError(errors.INVALID_CODE, "No group order matches this code.") from None
+
+        if not any(p["token"] == token for p in group["participants"]):
+            raise MiniDashError(errors.NOT_ALLOWED, "Only participants can see the summary.")
+        return self._build_summary(group)
+
+    def _build_summary(self, group: dict) -> dict:
+        # Prices are read from the menu now and never stored on the group order.
+        prices = {item["id"]: item["price_cents"] for item in self._restaurants.list_menu(group["restaurant_id"])}
+        shares = split_evenly(DELIVERY_FEE_CENTS, len(group["participants"]))  # R22-R24, join order
+
+        entries = []
+        for participant, fee_share in zip(group["participants"], shares):
+            subtotal = sum(
+                prices[item["menu_item_id"]] * item["quantity"]
+                for item in group["items"]
+                if item["participant_id"] == participant["participant_id"]
+            )
+            entries.append(
+                {
+                    "participant_id": participant["participant_id"],
+                    "display_name": participant["display_name"],
+                    "subtotal_cents": subtotal,
+                    "fee_share_cents": fee_share,
+                    "total_cents": subtotal + fee_share,
+                }
+            )
+        return {"status": group["status"], "delivery_fee_cents": DELIVERY_FEE_CENTS, "participants": entries}
+
+    # ------------------------------------------------------------- lock (R25-R27)
+
+    def lock(self, token: str | None, code: str) -> dict:
+        """The host locks an OPEN group in which every participant has an item."""
+        self._require_session(token)
+
+        def attempt(group: dict) -> tuple[MiniDashError | None, None]:
+            now = self._now()
+            self._expire_if_inactive(group)  # R31, may change group["status"]
+            rejection = self._lock_rejection(group, token)
+            if rejection is not None:
+                return rejection, None  # returned, not raised, so a saved EXPIRED survives
+            group["status"] = LOCKED
+            group["last_activity_at"] = now  # a successful lock is activity (R30)
+            return None, None
+
+        self._update_group(code, attempt)
+        return {"code": code, "status": LOCKED}
+
+    def _lock_rejection(self, group: dict, token: str) -> MiniDashError | None:
+        """The error a lock must be rejected with, or None. Checked in the order
+        ORDER_EXPIRED, ORDER_CHECKED_OUT, ORDER_LOCKED, NOT_HOST, EMPTY_PARTICIPANT.
+        """
+        rejection = self._status_rejection(group)
+        if rejection is not None:
+            return rejection
+        if token != group["host_token"]:  # R27
+            return MiniDashError(errors.NOT_HOST, "Only the host can lock the group order.")
+
+        with_items = {item["participant_id"] for item in group["items"]}
+        empty = [
+            {"participant_id": p["participant_id"], "display_name": p["display_name"]}
+            for p in group["participants"]
+            if p["participant_id"] not in with_items
+        ]
+        if empty:  # R26
+            return EmptyParticipantError(empty)
+        return None
+
     # ------------------------------------------------------------------ helpers
+
+    def _update_group(self, code: str, attempt) -> object:
+        """Run `attempt(group)` atomically. It returns (rejection, result): a rejection is
+        raised after the update is saved, otherwise the result is returned.
+        """
+        try:
+            rejection, result = self._groups.update_group_order(code, attempt)
+        except GroupOrderNotFoundError:
+            raise MiniDashError(errors.INVALID_CODE, "No group order matches this code.") from None
+        if rejection is not None:
+            raise rejection
+        return result
 
     def _now(self) -> str:
         return self._clock.now().isoformat()
