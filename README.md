@@ -4,6 +4,11 @@ A small food-delivery REST API built with FastAPI. Data is stored in a text file
 
 You can browse restaurants and menus, place an order, and follow its status. Friends can also build one order together as a **group order**: the host creates it and shares a 6-character code, everyone adds their own items, the host locks it and checks out, and the group becomes one normal order. The delivery fee is split between the participants.
 
+## Preview
+
+Video is included in the repo, since it is larger than 10mb it can not be displayed in the READ.me
+
+
 ## Requirements
 
 - Python 3.10 or newer
