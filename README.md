@@ -29,7 +29,7 @@ python -m uvicorn src.main:create_app --factory --reload
 
 The API is at http://127.0.0.1:8000 and interactive docs are at http://127.0.0.1:8000/docs.
 
-On first start, `data.txt` is filled with 3 restaurants and their menu items. If the file already has data, it is left alone, and an older file gets the new `sessions` and `group_orders` collections added without losing anything. To reset (for example after changing `src/store/seed.py`), empty `data.txt` and restart. This also deletes all orders, sessions and group orders.
+On first start, `data.txt` is filled with 4 restaurants and their menu items. If the file already has data, it is left alone, and an older file gets the new `sessions` and `group_orders` collections added without losing anything. To reset (for example after changing `src/store/seed.py`), empty `data.txt` and restart. This also deletes all orders, sessions and group orders.
 
 ## Run the tests
 
@@ -91,7 +91,7 @@ How it works:
 - **Lock:** only the host can lock, and only when every participant has at least one item. After that nobody can join or change items.
 - **Checkout:** only the host, only on a locked group, only while the restaurant is open, and with a non-blank address. It creates one normal order (see `/orders/{id}`) with everyone's items merged (the same menu item becomes one line) and a total of all subtotals plus the 499 cent fee.
 - **Expiry:** a group that is open or locked and has had no activity for 2 hours expires, and then rejects changes with `ORDER_EXPIRED`. Joining, adding, changing or removing items, and locking count as activity. Reading the summary, checkout and rejected requests do not.
-- **Restaurant hours** are compared in **UTC**. A restaurant is open from its `opens_at` up to, but not including, its `closes_at` (seed data: restaurant 1 is 11:00-22:00, restaurant 2 is 12:00-21:30, restaurant 3 is 10:00-23:00). If you try checkout by hand outside those hours, you get `RESTAURANT_CLOSED`.
+- **Restaurant hours** are compared in **UTC**. A restaurant is open from its `opens_at` up to, but not including, its `closes_at` (seed data: restaurant 1 is 11:00-22:00, restaurant 2 is 12:00-21:30, restaurant 3 is 10:00-23:00, and restaurant 4, Starlight Diner, is open 24 hours a day: `00:00` to `24:00`, where `24:00` means the end of the day). If you try checkout by hand outside a restaurant's hours, you get `RESTAURANT_CLOSED`.
 
 Example (replace the `<...>` values with what the previous call returned):
 

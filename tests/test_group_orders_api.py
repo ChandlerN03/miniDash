@@ -763,6 +763,8 @@ def protected_requests(code):
         ("add-item", "POST", items_path(code, 1), {"menu_item_id": ITEM_A, "quantity": 1}),
         ("change-item", "PATCH", item_path(code, 1, ITEM_A), {"quantity": 2}),
         ("remove-item", "DELETE", item_path(code, 1, ITEM_A), None),
+        ("leave", "POST", group_path(code, "/leave"), None),
+        ("remove-participant", "DELETE", group_path(code, "/participants/2"), None),
         ("summary", "GET", group_path(code, "/summary"), None),
         ("lock", "POST", group_path(code, "/lock"), None),
         ("checkout", "POST", group_path(code, "/checkout"), {"address": ADDRESS}),
@@ -876,6 +878,19 @@ def error_cases():
         group = locked_group(api)
         return api.post(group_path(group.code, "/checkout"), {"address": ADDRESS}, token=group.host)
 
+    def host_cannot_leave(api, clock):
+        group = ready_group(api)
+        return api.post(group_path(group.code, "/leave"), token=group.host)
+
+    def participant_not_found(api, clock):
+        group = ready_group(api)
+        return api.delete(group_path(group.code, "/participants/99"), token=group.host)
+
+    def removed_from_group(api, clock):
+        group = ready_group(api)
+        api.delete(group_path(group.code, f"/participants/{group.guest_id}"), token=group.host)
+        return api.get(group_path(group.code, "/summary"), token=group.guest)
+
     def bad_path_parameter(api, clock):
         host, code = new_group(api)
         return api.post(items_path(code, "one"), {"menu_item_id": ITEM_A, "quantity": 1}, token=host)
@@ -884,6 +899,7 @@ def error_cases():
         no_token, unknown_restaurant, bad_body, broken_json, wrong_code, already_joined, bad_quantity,
         not_on_menu, not_allowed, item_not_in_order, summary_outsider, not_host, empty_participant, not_locked,
         blank_address, expired, restaurant_closed, bad_path_parameter,
+        host_cannot_leave, participant_not_found, removed_from_group,
     ]
 
 
@@ -921,7 +937,11 @@ STATUS_BY_CODE = [
     # 403
     ("NOT_HOST", 403), ("NOT_ALLOWED", 403),
     # 404
-    ("INVALID_CODE", 404), ("RESTAURANT_NOT_FOUND", 404), ("ITEM_NOT_IN_ORDER", 404),
+    ("INVALID_CODE", 404), ("RESTAURANT_NOT_FOUND", 404), ("ITEM_NOT_IN_ORDER", 404), ("PARTICIPANT_NOT_FOUND", 404),
+    # 403 (membership)
+    ("REMOVED_FROM_GROUP", 403),
+    # 409 (membership)
+    ("HOST_CANNOT_LEAVE", 409),
     # 409
     ("GROUP_FULL", 409), ("ALREADY_JOINED", 409), ("ORDER_LOCKED", 409), ("ORDER_EXPIRED", 409),
     ("ORDER_CHECKED_OUT", 409), ("NOT_LOCKED", 409), ("EMPTY_PARTICIPANT", 409), ("RESTAURANT_CLOSED", 409),
@@ -990,6 +1010,12 @@ class RecordingService:
 
     def remove_item(self, token, code, participant_id, menu_item_id):
         self.calls.append(("remove_item", token, code, participant_id, menu_item_id))
+
+    def leave(self, token, code):
+        self.calls.append(("leave", token, code))
+
+    def remove_participant(self, token, code, participant_id):
+        self.calls.append(("remove_participant", token, code, participant_id))
 
     def get_summary(self, token, code):
         self.calls.append(("get_summary", token, code))
@@ -1101,6 +1127,8 @@ def test_every_endpoint_of_the_design_exists(app):
         ("get", "/group-orders/{code}/summary"),
         ("post", "/group-orders/{code}/lock"),
         ("post", "/group-orders/{code}/checkout"),
+        ("post", "/group-orders/{code}/leave"),
+        ("delete", "/group-orders/{code}/participants/{participant_id}"),
     }
 
     actual = {(method, path) for path in paths for method in paths[path] if path.startswith(("/sessions", "/group-orders"))}
@@ -1299,3 +1327,180 @@ def test_the_summary_order_id_is_none_for_an_expired_group(api, fake_clock):
 
     assert summary["status"] == "EXPIRED"
     assert summary["order_id"] is None
+
+
+# ===================================== leaving a group, and the host removing a participant
+
+
+def leave_path(code):
+    return group_path(code, "/leave")
+
+
+def person_path(code, participant_id):
+    return group_path(code, f"/participants/{participant_id}")
+
+
+def participants_of(api, code, token):
+    return api.get(group_path(code, "/summary"), token=token).json()["participants"]
+
+
+# --- POST /group-orders/{code}/leave
+
+
+def test_leave_returns_204_with_no_body_and_the_person_is_gone(api):
+    group = ready_group(api)
+
+    response = api.post(leave_path(group.code), token=group.guest)
+
+    assert response.status_code == 204 and response.body == b""
+    assert [p["display_name"] for p in participants_of(api, group.code, group.host)] == ["Host"]
+
+
+def test_after_leaving_the_summary_is_not_allowed_for_that_person(api):
+    group = ready_group(api)
+    api.post(leave_path(group.code), token=group.guest)
+
+    assert_error(api.get(group_path(group.code, "/summary"), token=group.guest), 403, "NOT_ALLOWED")
+
+
+def test_someone_who_left_can_join_again_and_gets_a_new_participant_id(api):
+    group = ready_group(api)
+    api.post(leave_path(group.code), token=group.guest)
+
+    response = api.post(group_path(group.code, "/join"), {"display_name": "Guest"}, token=group.guest)
+
+    assert response.status_code == 201
+    assert response.json()["participant_id"] == group.guest_id + 1
+
+
+def test_the_host_leaving_gives_409_host_cannot_leave(api):
+    group = ready_group(api)
+
+    assert_error(api.post(leave_path(group.code), token=group.host), 409, "HOST_CANNOT_LEAVE")
+
+
+def test_leaving_when_not_in_the_group_gives_403(api):
+    group = ready_group(api)
+
+    assert_error(api.post(leave_path(group.code), token=new_session(api)), 403, "NOT_ALLOWED")
+
+
+def test_leaving_a_locked_group_gives_409(api):
+    group = locked_group(api)
+
+    assert_error(api.post(leave_path(group.code), token=group.guest), 409, "ORDER_LOCKED")
+
+
+def test_leaving_an_expired_group_gives_409(api, fake_clock):
+    group = ready_group(api)
+    fake_clock.advance(TWO_HOURS)
+
+    assert_error(api.post(leave_path(group.code), token=group.guest), 409, "ORDER_EXPIRED")
+
+
+def test_leaving_with_a_wrong_code_gives_404(api):
+    group = ready_group(api)
+
+    assert_error(api.post(leave_path("nope42"), token=group.guest), 404, "INVALID_CODE")
+
+
+def test_leaving_removes_that_persons_items_from_the_summary_and_changes_fee_shares(api):
+    group = ready_group(api)
+
+    api.post(leave_path(group.code), token=group.guest)
+
+    entries = participants_of(api, group.code, group.host)
+    assert len(entries) == 1 and entries[0]["fee_share_cents"] == 499
+    assert entries[0]["items"] == [item_line(ITEM_A, 2)]
+
+
+# --- DELETE /group-orders/{code}/participants/{participant_id}
+
+
+def test_the_host_removes_a_participant_with_204_and_no_body(api):
+    group = ready_group(api)
+
+    response = api.delete(person_path(group.code, group.guest_id), token=group.host)
+
+    assert response.status_code == 204 and response.body == b""
+    assert [p["display_name"] for p in participants_of(api, group.code, group.host)] == ["Host"]
+
+
+def test_a_guest_cannot_remove_anyone_403(api):
+    group = ready_group(api)
+    other, other_id = join_group(api, group.code, "Other")
+
+    assert_error(api.delete(person_path(group.code, other_id), token=group.guest), 403, "NOT_HOST")
+    assert_error(api.delete(person_path(group.code, 1), token=group.guest), 403, "NOT_HOST")
+
+
+def test_removing_the_host_gives_409(api):
+    group = ready_group(api)
+
+    assert_error(api.delete(person_path(group.code, 1), token=group.host), 409, "HOST_CANNOT_LEAVE")
+
+
+def test_removing_someone_who_is_not_there_gives_404(api):
+    group = ready_group(api)
+
+    assert_error(api.delete(person_path(group.code, 99), token=group.host), 404, "PARTICIPANT_NOT_FOUND")
+
+
+def test_removing_in_a_locked_group_gives_409(api):
+    group = locked_group(api)
+
+    assert_error(api.delete(person_path(group.code, group.guest_id), token=group.host), 409, "ORDER_LOCKED")
+
+
+def test_a_participant_id_that_is_not_a_number_gives_422_when_removing(api):
+    group = ready_group(api)
+
+    assert_error(api.delete(person_path(group.code, "bo"), token=group.host), 422, "VALIDATION_ERROR")
+
+
+# --- a removed person stays out
+
+
+def test_a_removed_person_gets_403_removed_from_group_on_everything_they_try(api):
+    group = ready_group(api)
+    api.delete(person_path(group.code, group.guest_id), token=group.host)
+
+    assert_error(api.get(group_path(group.code, "/summary"), token=group.guest), 403, "REMOVED_FROM_GROUP")
+    assert_error(add_item(api, group.guest, group.code, group.guest_id, ITEM_A, 1), 403, "REMOVED_FROM_GROUP")
+    assert_error(api.post(leave_path(group.code), token=group.guest), 403, "REMOVED_FROM_GROUP")
+    assert_error(
+        api.post(group_path(group.code, "/join"), {"display_name": "Guest"}, token=group.guest),
+        403,
+        "REMOVED_FROM_GROUP",
+    )
+
+
+def test_removing_a_person_does_not_give_the_host_their_token_or_anyone_elses(api):
+    group = ready_group(api)
+
+    api.delete(person_path(group.code, group.guest_id), token=group.host)
+
+    text = api.get(group_path(group.code, "/summary"), token=group.host).body.decode()
+    assert group.guest not in text and group.host not in text
+
+
+def test_the_host_can_lock_after_removing_the_person_who_had_no_items(api):
+    host, code = new_group(api)
+    guest, guest_id = join_group(api, code)
+    add_item(api, host, code, 1, ITEM_A, 1)
+    assert_error(api.post(group_path(code, "/lock"), token=host), 409, "EMPTY_PARTICIPANT")
+
+    api.delete(person_path(code, guest_id), token=host)
+
+    assert api.post(group_path(code, "/lock"), token=host).status_code == 200
+
+
+# --- the routes only pass the request through
+
+
+def test_leave_and_remove_participant_pass_the_header_code_and_id_to_the_service(api, recorder):
+    left = api.post(leave_path("Ab3dEf"), token="tok-9")
+    removed = api.delete(person_path("Ab3dEf", 4), token="tok-1")
+
+    assert (left.status_code, left.body, removed.status_code, removed.body) == (204, b"", 204, b"")
+    assert recorder.calls == [("leave", "tok-9", "Ab3dEf"), ("remove_participant", "tok-1", "Ab3dEf", 4)]

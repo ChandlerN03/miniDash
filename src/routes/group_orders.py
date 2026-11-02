@@ -69,6 +69,23 @@ def remove_item(
     return Response(status_code=204)
 
 
+@router.post("/group-orders/{code}/leave", status_code=204)
+def leave(code: str, request: Request, x_session_token: str | None = Header(default=None)):
+    _service(request).leave(x_session_token, code)
+    return Response(status_code=204)
+
+
+@router.delete("/group-orders/{code}/participants/{participant_id}", status_code=204)
+def remove_participant(
+    code: str,
+    participant_id: int,
+    request: Request,
+    x_session_token: str | None = Header(default=None),
+):
+    _service(request).remove_participant(x_session_token, code, participant_id)
+    return Response(status_code=204)
+
+
 @router.get("/group-orders/{code}/summary")
 def get_summary(code: str, request: Request, x_session_token: str | None = Header(default=None)):
     return _service(request).get_summary(x_session_token, code)

@@ -124,7 +124,8 @@
   #error-dialog .dialog-head { background: var(--danger-bg); color: var(--danger-fg); }
   #receipt-dialog .dialog-head { background: var(--success-bg); color: var(--success-fg); }
   .dialog-body { display: grid; gap: var(--space-3); padding: var(--space-5); overflow-wrap: anywhere; }
-  .dialog-foot { display: flex; justify-content: flex-end; padding: 0 var(--space-5) var(--space-5); }
+  .dialog-foot { display: flex; justify-content: flex-end; gap: var(--space-2); padding: 0 var(--space-5) var(--space-5); }
+  #confirm-dialog .dialog-head { background: var(--locked-bg); color: var(--locked-fg); }
   .receipt-row { display: flex; justify-content: space-between; align-items: baseline; gap: var(--space-3); }
   #receipt-lines { display: grid; gap: var(--space-2); padding-bottom: var(--space-3); border-bottom: 1px solid var(--border); }
   #receipt-total { font-size: var(--text-2xl); font-weight: 800; }
@@ -183,7 +184,10 @@
         </div>
         <p id="restaurant-meta" class="muted"></p>
         <p id="status-note"></p>
-        <p class="muted">Delivery fee: <strong id="delivery-fee"></strong>, split evenly between everyone.</p>
+        <div class="row">
+          <p class="muted">Delivery fee: <strong id="delivery-fee"></strong>, split evenly between everyone.</p>
+          <button id="leave-button" type="button" class="btn btn-danger">Leave group</button>
+        </div>
       </section>
 
       <div class="layout">
@@ -223,6 +227,10 @@
 
           <section id="host-controls" class="card stack" aria-labelledby="host-title" hidden>
             <h2 id="host-title">Host controls</h2>
+            <div class="stack">
+              <h3 id="people-title">People in this order</h3>
+              <ul id="people-list" aria-labelledby="people-title"></ul>
+            </div>
             <p class="muted">Lock the order once everyone has at least one item, then check out.</p>
             <button id="lock-button" type="button" class="btn btn-primary">Lock group order</button>
             <div>
@@ -245,6 +253,15 @@
   <div class="dialog-head"><span aria-hidden="true">!</span><h2 id="error-title"></h2></div>
   <div class="dialog-body"><p id="error-text"></p><p id="error-detail" hidden></p></div>
   <div class="dialog-foot"><button id="error-ok" type="button" class="btn btn-primary">OK</button></div>
+</dialog>
+
+<dialog id="confirm-dialog" aria-labelledby="confirm-title" aria-describedby="confirm-text">
+  <div class="dialog-head"><span aria-hidden="true">?</span><h2 id="confirm-title"></h2></div>
+  <div class="dialog-body"><p id="confirm-text"></p></div>
+  <div class="dialog-foot">
+    <button id="confirm-cancel" type="button" class="btn" autofocus>Cancel</button>
+    <button id="confirm-ok" type="button" class="btn btn-primary"></button>
+  </div>
 </dialog>
 
 <dialog id="receipt-dialog" aria-labelledby="receipt-title">
@@ -290,6 +307,7 @@ var TITLES = {
   ITEM_NOT_ON_MENU: "Not on the menu", NOT_ALLOWED: "Not allowed", NOT_HOST: "Host only",
   EMPTY_PARTICIPANT: "Someone has no items", NOT_LOCKED: "Lock the order first", RESTAURANT_CLOSED: "Restaurant is closed",
   INVALID_ADDRESS: "Address needed", ITEM_NOT_IN_ORDER: "Item not in your order", NETWORK: "Can't reach the server",
+  HOST_CANNOT_LEAVE: "Host can't leave", PARTICIPANT_NOT_FOUND: "Person not found", REMOVED_FROM_GROUP: "Removed from the group",
   NAME_REQUIRED: "Name needed", CODE_REQUIRED: "Code needed"
 };
 var MESSAGES = {
@@ -311,6 +329,9 @@ var MESSAGES = {
   INVALID_ADDRESS: "Enter a delivery address so we know where to send the order.",
   ITEM_NOT_IN_ORDER: "That item is no longer in your order. Refresh to see the latest.",
   NETWORK: "Could not reach the server. Check your connection and try again.",
+  HOST_CANNOT_LEAVE: "The host can't leave or be removed from their own group order.",
+  PARTICIPANT_NOT_FOUND: "That person is no longer in this group order. Refresh to see who is here.",
+  REMOVED_FROM_GROUP: "The host removed you from this group order, so you can't join it again.",
   NAME_REQUIRED: "Enter your name first so your friends can see who you are.",
   CODE_REQUIRED: "Enter the share code your friend gave you to join their group order."
 };
@@ -325,6 +346,10 @@ var errorReturnKey = "";
 var errorQueue = [];     // errors that arrived while another error popup was open
 var errorDialog = byId("error-dialog");
 var receiptDialog = byId("receipt-dialog");
+var confirmDialog = byId("confirm-dialog");
+var confirmReturnKey = "";
+var confirmResolve = null;
+var confirmed = false;
 
 function byId(id) { return document.getElementById(id); }
 
@@ -459,6 +484,9 @@ function handleError(error, button) {
       sessionStorage.removeItem(GROUP_KEY);
       stopPolling();
     }
+    if (error.code === "REMOVED_FROM_GROUP") {
+      resetToStart(); // the host removed this person: back to the start screen
+    }
   } else {
     showErrorDialog("UNKNOWN", "", key);
   }
@@ -474,6 +502,22 @@ errorDialog.addEventListener("close", function () {
 receiptDialog.addEventListener("close", function () { focusByKey("view-receipt-button"); });
 byId("error-ok").addEventListener("click", function () { errorDialog.close(); });
 byId("receipt-close").addEventListener("click", function () { receiptDialog.close(); });
+
+// Asks "are you sure?" in a native dialog. Resolves true only if the person presses the confirm button.
+function askConfirm(title, text, okLabel, focusKey) {
+  byId("confirm-title").textContent = title;
+  byId("confirm-text").textContent = text;
+  byId("confirm-ok").textContent = okLabel;
+  confirmReturnKey = focusKey;
+  confirmed = false;
+  return new Promise(function (resolve) {
+    confirmResolve = resolve;
+    confirmDialog.showModal();
+  });
+}
+confirmDialog.addEventListener("close", function () { focusByKey(confirmReturnKey); confirmResolve(confirmed); });
+byId("confirm-ok").addEventListener("click", function () { confirmed = true; confirmDialog.close(); });
+byId("confirm-cancel").addEventListener("click", function () { confirmDialog.close(); });
 
 function showReceipt(summary) {
   var me = summary.participants.find(function (p) { return p.participant_id === summary.you.participant_id; });
@@ -612,6 +656,44 @@ async function joinGroup() {
   await enterGroup(code);
 }
 
+function resetToStart(message) {
+  stopPolling();
+  state.code = null;
+  state.summary = null;
+  lastSummaryJson = null;
+  sessionStorage.removeItem(GROUP_KEY);
+  byId("group-screen").hidden = true;
+  byId("start-screen").hidden = false;
+  byId("code-chip").hidden = true;
+  byId("main").focus();
+  if (message) {
+    toast(message);
+  }
+}
+
+async function leaveFlow(button) {
+  if (!(await askConfirm("Leave this group order?", "Your items will be removed. You can join again later with the code.", "Leave group", "leave-button"))) {
+    return;
+  }
+  run(async function () {
+    await api("POST", groupPath() + "/leave");
+    resetToStart("You left the group order");
+  }, button);
+}
+
+async function removePerson(entry, button) {
+  var title = "Remove " + entry.display_name + " from the group?";
+  var text = entry.display_name + " will lose their items and won't be able to join this group order again.";
+  if (!(await askConfirm(title, text, "Remove", "kick-" + entry.participant_id))) {
+    return;
+  }
+  run(async function () {
+    await api("DELETE", groupPath() + "/participants/" + entry.participant_id);
+    await refreshSummary("action");
+    toast(entry.display_name + " was removed");
+  }, button);
+}
+
 async function copyCode(button) {
   var copied = false;
   try {
@@ -707,6 +789,22 @@ function renderSummary(summary) {
   foot.appendChild(total);
 }
 
+function renderPeople(summary) {
+  var list = byId("people-list");
+  list.replaceChildren();
+  var others = summary.participants.filter(function (p) { return p.participant_id !== summary.you.participant_id; });
+  if (others.length === 0) {
+    list.appendChild(make("li", "Nobody else has joined yet.", "empty"));
+  }
+  others.forEach(function (entry) {
+    var line = make("li", undefined, "line");
+    line.appendChild(make("span", entry.display_name, "item-info"));
+    line.appendChild(makeButton("Remove", "btn-danger js-mutating remove-person-button", "kick-" + entry.participant_id,
+      "Remove " + entry.display_name + " from the group", function (button) { removePerson(entry, button); }));
+    list.appendChild(line);
+  });
+}
+
 function renderStatus(summary) {
   var info = STATUS[summary.status];
   var badge = byId("status-badge");
@@ -733,6 +831,8 @@ function applyControls() {
   document.querySelectorAll(".js-mutating").forEach(function (el) { el.disabled = !state.isOpen || el.classList.contains("is-loading"); });
   document.querySelectorAll(".quantity-stepper").forEach(function (el) { el.sync(); });
   byId("host-controls").hidden = !summary.you.is_host;
+  byId("leave-button").hidden = summary.you.is_host; // the host cannot leave their own group order
+  byId("leave-button").disabled = !state.isOpen || byId("leave-button").classList.contains("is-loading");
   byId("lock-button").disabled = !state.isOpen || byId("lock-button").classList.contains("is-loading");
   byId("checkout-button").disabled = summary.status !== "LOCKED" || byId("checkout-button").classList.contains("is-loading");
   byId("address-input").disabled = summary.status !== "LOCKED";
@@ -748,6 +848,7 @@ function applySummary(summary, source) {
   if (changed) {
     renderStatus(summary);
     renderSummary(summary);
+    renderPeople(summary);
     renderMyItems(summary.participants.find(function (p) { return p.participant_id === summary.you.participant_id; }));
   }
   applyControls();
@@ -805,7 +906,8 @@ async function pollOnce() {
       lastPollError = null;
     } catch (error) {
       var code = error instanceof ApiError ? error.code : "UNKNOWN";
-      if (code !== lastPollError && !errorDialog.open) {
+      var removed = code === "REMOVED_FROM_GROUP";
+      if (removed || (code !== lastPollError && !errorDialog.open)) {
         lastPollError = code;
         handleError(error, null);
       }
@@ -883,6 +985,7 @@ byId("refresh-button").addEventListener("click", function () { run(function () {
 byId("lock-button").addEventListener("click", function () { run(lockGroup, this); });
 byId("checkout-button").addEventListener("click", function () { run(checkout, this); });
 byId("copy-button").addEventListener("click", function () { copyCode(this); });
+byId("leave-button").addEventListener("click", function () { leaveFlow(this); });
 byId("view-receipt-button").addEventListener("click", function () { showReceipt(state.summary); });
 
 run(start);

@@ -52,6 +52,14 @@ MAIN_CONTROL_IDS = [
     "summary-region",
     "summary-foot",
     "topbar",
+    # --- added with leaving a group and removing a participant
+    "leave-button",
+    "people-list",
+    "confirm-dialog",
+    "confirm-title",
+    "confirm-text",
+    "confirm-ok",
+    "confirm-cancel",
 ]
 
 # CSS classes the script puts on the controls it creates for each menu item / own item.
@@ -710,12 +718,14 @@ def test_the_error_dialog_has_a_title_a_message_and_an_ok_button(html):
 
 
 def test_modals_use_the_native_dialog_element_with_showModal(script):
-    assert script.count("showModal()") >= 2  # the error dialog and the receipt dialog
+    assert script.count("showModal()") >= 3  # the error, receipt and confirm dialogs
     assert "dialog.open" in script or ".open" in script
 
 
 def test_there_is_only_one_error_modal_and_it_is_reused(html, script):
-    assert html.count("<dialog") == 2  # the error dialog and the receipt dialog, nothing else
+    # error, receipt and (new) confirm: three dialogs in all, and only one of them shows errors
+    assert html.count("<dialog") == 3
+    assert html.count('id="error-dialog"') == 1
     assert re.search(r"if \(!\w+\.open\)", script)
 
 
@@ -885,8 +895,10 @@ def test_after_checkout_the_page_stays_read_only_with_the_badge_checked_out(scri
 # ----------------------------------------------------------------------- size and data
 
 
-def test_the_page_is_under_900_lines(page_text):
-    assert len(page_text.splitlines()) <= 900
+# Slice 10 asked for "under about 900 lines". Leaving a group and removing people added the people list, a
+# confirm dialog and their code, so the limit is now 1000.
+def test_the_page_is_under_1000_lines(page_text):
+    assert len(page_text.splitlines()) <= 1000
 
 
 @pytest.mark.parametrize(
@@ -900,3 +912,142 @@ def test_the_page_reads_the_new_summary_fields(script, field):
 def test_money_is_still_formatted_with_whole_cents_only(script):
     assert re.search(r"function formatMoney\(cents\)", script)
     assert "Number.isInteger(cents)" in script and "% 100" in script
+
+
+# =====================================================================================
+# Leaving a group, and the host removing a participant
+# =====================================================================================
+
+NEW_CODES = ["HOST_CANNOT_LEAVE", "PARTICIPANT_NOT_FOUND", "REMOVED_FROM_GROUP"]
+
+
+@pytest.mark.parametrize("code", NEW_CODES)
+def test_the_new_error_codes_have_a_title_and_a_message_of_their_own(script, code):
+    titles = re.search(r"var TITLES = \{(.*?)\};", script, re.S).group(1)
+    messages = re.search(r"var MESSAGES = \{(.*?)\};", script, re.S).group(1)
+
+    assert re.search(rf'\b{code}\s*:\s*"[^"]{{3,}}"', titles), f"title for {code}"
+    assert re.search(rf'\b{code}\s*:\s*"[^"]{{20,}}"', messages), f"message for {code}"
+
+
+def test_the_removed_message_says_they_cannot_come_back(script):
+    assert re.search(r'REMOVED_FROM_GROUP\s*:\s*"[^"]*can\'t join it again[^"]*"', script)
+
+
+def test_there_is_a_leave_button_that_is_a_real_danger_styled_button(html):
+    assert re.search(r'<button\b[^>]*\bid="leave-button"[^>]*type="button"[^>]*>\s*Leave group\s*</button>', html) or re.search(
+        r'<button\b[^>]*\bid="leave-button"[^>]*>\s*Leave group\s*</button>', html
+    )
+    assert re.search(r'id="leave-button"[^>]*class="[^"]*btn-danger', html)
+
+
+def test_the_host_does_not_see_the_leave_button(script):
+    assert re.search(r'byId\("leave-button"\)\.hidden\s*=\s*summary\.you\.is_host', script)
+
+
+def test_the_leave_button_is_disabled_unless_the_order_is_open(script):
+    assert re.search(r'byId\("leave-button"\)\.disabled\s*=\s*!state\.isOpen', script)
+
+
+def test_leaving_calls_the_leave_endpoint(script):
+    assert re.search(r'api\("POST",\s*groupPath\(\)\s*\+\s*"/leave"\)', script)
+
+
+def test_removing_a_person_calls_the_delete_participant_endpoint(script):
+    assert re.search(r'api\("DELETE",\s*groupPath\(\)\s*\+\s*"/participants/"\s*\+\s*\w+(\.\w+)?\)', script)
+
+
+def test_the_host_has_a_people_list_with_a_remove_button_for_everyone_else(html, script):
+    assert re.search(r'<ul\b[^>]*\bid="people-list"', html)
+    host_controls = re.search(r'<section[^>]*id="host-controls".*?</section>', html, re.S).group(0)
+    assert 'id="people-list"' in host_controls  # so only the host sees it
+    assert "remove-person-button" in script
+    assert re.search(r"participant_id\s*!==\s*summary\.you\.participant_id", script)  # not a button for yourself
+
+
+def test_the_remove_person_buttons_are_disabled_when_the_order_is_not_open(script):
+    assert re.search(r'remove-person-button[^;]*js-mutating|js-mutating[^;]*remove-person-button', script)
+
+
+def test_each_remove_button_says_who_it_removes(script):
+    assert re.search(r'"Remove "\s*\+\s*\w+(\.\w+)?\s*\+\s*" from the group"', script)
+
+
+def test_remove_buttons_use_a_stable_focus_key_per_person(script):
+    assert re.search(r'"kick-"\s*\+', script)
+
+
+def test_the_people_list_has_an_empty_state(html, script):
+    assert "Nobody else has joined yet" in html
+
+
+# ----------------------------------------------------------------- the confirm dialog
+
+
+def test_leaving_and_removing_ask_first_in_a_native_dialog(html, script):
+    dialog = re.search(r'<dialog\b[^>]*id="confirm-dialog".*?</dialog>', html, re.S).group(0)
+
+    assert 'aria-labelledby="confirm-title"' in dialog and 'aria-describedby="confirm-text"' in dialog
+    assert re.search(r'<button[^>]*id="confirm-cancel"[^>]*>\s*Cancel\s*</button>', dialog)
+    assert 'id="confirm-ok"' in dialog
+    assert "askConfirm" in script and "confirmDialog.showModal()" in script
+
+
+def test_cancel_is_the_default_choice_in_the_confirm_dialog(html):
+    dialog = re.search(r'<dialog\b[^>]*id="confirm-dialog".*?</dialog>', html, re.S).group(0)
+
+    assert re.search(r'<button[^>]*id="confirm-cancel"[^>]*\bautofocus\b', dialog)  # focus starts on Cancel
+    assert dialog.index('id="confirm-cancel"') < dialog.index('id="confirm-ok"')
+
+
+def test_nothing_is_sent_until_the_person_confirms(script):
+    # both flows return early unless the answer is yes, and only then reach the API call
+    for flow, call in (("leaveFlow", '"/leave"'), ("removePerson", '"/participants/"')):
+        body = re.search(rf"async function {flow}\(.*?\n\}}", script, re.S).group(0)
+        assert re.search(r"if \(!\(await askConfirm\(", body), flow
+        assert body.index("askConfirm(") < body.index("return;") < body.index(call), flow
+
+
+def test_leaving_and_removing_say_what_will_happen_and_that_removed_people_cannot_return(script):
+    assert "Leave this group order?" in script
+    assert "Your items will be removed" in script
+    assert re.search(r"won't be able to join (this group order )?again", script)
+
+
+def test_closing_the_confirm_dialog_returns_focus_and_answers_no(script):
+    assert re.search(r'confirmDialog\.addEventListener\("close"', script)
+    assert "confirmReturnKey" in script
+
+
+def test_the_confirm_dialog_uses_text_content_for_names(script):
+    assert re.search(r'byId\("confirm-title"\)\.textContent', script) and re.search(r'byId\("confirm-text"\)\.textContent', script)
+
+
+# ---------------------------------------------------- what happens on the page afterwards
+
+
+def test_after_leaving_the_page_goes_back_to_the_start_screen(script):
+    assert "resetToStart" in script
+    reset = re.search(r"function resetToStart\(.*?\n\}", script, re.S).group(0)
+    assert 'byId("start-screen").hidden = false' in reset and 'byId("group-screen").hidden = true' in reset
+    assert "stopPolling()" in reset and "GROUP_KEY" in reset
+    assert "You left the group order" in script
+
+
+def test_a_removed_person_is_sent_back_to_the_start_screen_with_a_message(script):
+    assert re.search(r'REMOVED_FROM_GROUP', script)
+    assert re.search(r'code === "REMOVED_FROM_GROUP"', script)
+
+
+def test_a_removal_found_by_polling_is_always_shown_even_if_another_popup_is_open(script):
+    assert re.search(r'code === "REMOVED_FROM_GROUP"[^}]*handleError', script, re.S) or re.search(
+        r'REMOVED_FROM_GROUP[^;]*;[^}]*handleError', script, re.S
+    )
+
+
+def test_the_host_gets_a_toast_when_someone_is_removed(script):
+    assert re.search(r'display_name\s*\+\s*" was removed"', script)
+
+
+def test_the_page_does_not_use_the_browser_confirm(html):
+    assert "confirm(" not in html.replace("askConfirm(", "").replace("confirmed", "")

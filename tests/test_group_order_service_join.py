@@ -808,3 +808,628 @@ def test_a_rejected_join_returns_no_restaurant_and_changes_nothing(service, repo
     assert_rejected("ALREADY_JOINED", service.join, host, code, "Hana")
 
     assert repo.get_group_order(code) == before
+
+
+# ==============================================================================================
+# Leaving a group, and the host removing a participant (R19). Decisions:
+# - leave and remove only work while the order is OPEN (like item changes)
+# - the host can neither leave nor be removed
+# - a person who LEFT can join again (as a new participant); a person the host REMOVED cannot
+# - leaving and removing count as activity; participant ids are never reused
+# ==============================================================================================
+
+ITEM_X, ITEM_Y = 5, 6  # on the menu of restaurant 2
+
+
+def names(repo, code):
+    return [p["display_name"] for p in repo.get_group_order(code)["participants"]]
+
+
+def ids(repo, code):
+    return [p["participant_id"] for p in repo.get_group_order(code)["participants"]]
+
+
+def build_group(service, guest_names=("Bo", "Cy"), with_items=True):
+    """A group at restaurant 2: Host (id 1) and the guests, each with one item. Returns (code, tokens)."""
+    host, code = new_group(service, name="Host")
+    tokens = [host]
+    for name in guest_names:
+        tokens.append(join_new_user(service, code, name))
+    if with_items:
+        for participant_id, token in enumerate(tokens, start=1):
+            service.add_item(token, code, participant_id, ITEM_X, 1)
+    return code, tokens
+
+
+def assert_items_belong_to_members(repo, code):
+    group = repo.get_group_order(code)
+    member_ids = {p["participant_id"] for p in group["participants"]}
+    assert {i["participant_id"] for i in group["items"]} <= member_ids, group["items"]
+
+
+# ------------------------------------------------------------------------------ leaving
+
+
+def test_a_guest_can_leave_and_is_removed_from_the_participants(service, repo):
+    code, tokens = build_group(service)
+
+    result = service.leave(tokens[1], code)
+
+    assert result is None
+    assert names(repo, code) == ["Host", "Cy"]
+    assert ids(repo, code) == [1, 3]  # the others keep their ids and their order
+
+
+def test_leaving_removes_all_of_that_persons_items_and_keeps_everyone_elses(service, repo):
+    code, tokens = build_group(service)
+    service.add_item(tokens[1], code, 2, ITEM_Y, 4)
+
+    service.leave(tokens[1], code)
+
+    items = repo.get_group_order(code)["items"]
+    assert {i["participant_id"] for i in items} == {1, 3}
+    assert [(i["participant_id"], i["menu_item_id"], i["quantity"]) for i in items] == [(1, ITEM_X, 1), (3, ITEM_X, 1)]
+    assert_items_belong_to_members(repo, code)
+
+
+def test_the_summary_after_someone_leaves_has_one_row_less_and_new_fee_shares(service):
+    code, tokens = build_group(service)
+    assert [e["fee_share_cents"] for e in service.get_summary(tokens[0], code)["participants"]] == [166, 166, 167]
+
+    service.leave(tokens[2], code)
+
+    summary = service.get_summary(tokens[0], code)
+    assert [e["display_name"] for e in summary["participants"]] == ["Host", "Bo"]
+    assert [e["fee_share_cents"] for e in summary["participants"]] == [249, 250]
+    assert sum(e["fee_share_cents"] for e in summary["participants"]) == 499
+
+
+def test_leaving_records_who_left_and_why(service, repo):
+    code, tokens = build_group(service)
+
+    service.leave(tokens[1], code)
+
+    removed = repo.get_group_order(code)["removed_participants"]
+    assert [(r["participant_id"], r["display_name"], r["reason"]) for r in removed] == [(2, "Bo", "LEFT")]
+    assert removed[0]["token"] == tokens[1]
+
+
+def test_leaving_counts_as_activity(service, repo, fake_clock):
+    code, tokens = build_group(service)
+    fake_clock.advance(timedelta(hours=1))
+
+    service.leave(tokens[1], code)
+
+    assert repo.get_group_order(code)["last_activity_at"] == fake_clock.now().isoformat()
+
+
+def test_leaving_restarts_the_two_hour_countdown(service, repo, fake_clock):
+    code, tokens = build_group(service)
+    fake_clock.advance(timedelta(hours=1, minutes=30))
+    service.leave(tokens[1], code)
+
+    fake_clock.advance(TWO_HOURS - ONE_SECOND)
+    service.add_item(tokens[0], code, 1, ITEM_Y, 1)  # still open
+
+    assert repo.get_group_order(code)["status"] == "OPEN"
+
+
+def test_the_host_cannot_leave(service, repo, fake_clock):
+    code, tokens = build_group(service)
+    fake_clock.advance(timedelta(minutes=10))
+    before = repo.get_group_order(code)
+
+    assert_rejected("HOST_CANNOT_LEAVE", service.leave, tokens[0], code)
+
+    assert repo.get_group_order(code) == before
+
+
+def test_someone_who_never_joined_cannot_leave(service, repo):
+    code, _ = build_group(service)
+    outsider = new_user(service)
+    before = repo.get_group_order(code)
+
+    assert_rejected("NOT_ALLOWED", service.leave, outsider, code)
+
+    assert repo.get_group_order(code) == before
+
+
+def test_leaving_twice_the_second_time_is_not_allowed(service, repo):
+    code, tokens = build_group(service)
+    service.leave(tokens[1], code)
+
+    assert_rejected("NOT_ALLOWED", service.leave, tokens[1], code)
+
+    assert names(repo, code) == ["Host", "Cy"]
+
+
+@pytest.mark.parametrize("token", [None, "", "never-issued"])
+def test_leave_needs_a_valid_session(service, repo, token):
+    code, _ = build_group(service)
+
+    assert_rejected("INVALID_SESSION", service.leave, token, code)
+
+    assert len(repo.get_group_order(code)["participants"]) == 3
+
+
+def test_leave_with_a_wrong_code_gives_invalid_code(service):
+    _, tokens = build_group(service)
+
+    assert_rejected("INVALID_CODE", service.leave, tokens[1], "nope42")
+
+
+def test_leave_is_rejected_once_the_order_is_locked(service, repo, fake_clock):
+    code, tokens = build_group(service)
+    service.lock(tokens[0], code)
+    fake_clock.advance(timedelta(minutes=10))
+    before = repo.get_group_order(code)
+
+    assert_rejected("ORDER_LOCKED", service.leave, tokens[1], code)
+
+    assert repo.get_group_order(code) == before
+
+
+def test_leave_is_rejected_once_the_order_is_checked_out(service, repo):
+    code, tokens = build_group(service)
+    set_status(repo, code, "CHECKED_OUT")
+
+    assert_rejected("ORDER_CHECKED_OUT", service.leave, tokens[1], code)
+
+    assert len(repo.get_group_order(code)["participants"]) == 3
+
+
+def test_leave_at_1_59_59_works_and_at_exactly_2_hours_the_group_expires(service, repo, fake_clock):
+    code, tokens = build_group(service)
+    fake_clock.advance(TWO_HOURS - ONE_SECOND)
+    service.leave(tokens[1], code)
+    assert names(repo, code) == ["Host", "Cy"]
+
+    fake_clock.advance(TWO_HOURS)  # two hours after that leave
+    assert_rejected("ORDER_EXPIRED", service.leave, tokens[2], code)
+
+    assert repo.get_group_order(code)["status"] == "EXPIRED"
+    assert names(repo, code) == ["Host", "Cy"]
+
+
+def test_leave_checks_the_group_status_before_who_is_asking(service):
+    code, tokens = build_group(service)
+    outsider = new_user(service)
+    service.lock(tokens[0], code)
+
+    assert_rejected("ORDER_LOCKED", service.leave, outsider, code)  # not NOT_ALLOWED
+    assert_rejected("ORDER_LOCKED", service.leave, tokens[0], code)  # not HOST_CANNOT_LEAVE
+
+
+def test_someone_who_left_can_no_longer_see_the_summary_or_change_items(service):
+    code, tokens = build_group(service)
+    service.leave(tokens[1], code)
+
+    assert_rejected("NOT_ALLOWED", service.get_summary, tokens[1], code)
+    assert_rejected("NOT_ALLOWED", service.add_item, tokens[1], code, 2, ITEM_Y, 1)
+    assert_rejected("NOT_ALLOWED", service.change_item, tokens[1], code, 2, ITEM_X, 2)
+    assert_rejected("NOT_ALLOWED", service.remove_item, tokens[1], code, 2, ITEM_X)
+
+
+def test_someone_who_left_can_join_again_as_a_new_participant(service, repo):
+    code, tokens = build_group(service)
+    service.leave(tokens[1], code)
+
+    rejoined = service.join(tokens[1], code, "Bo")
+
+    assert rejoined["participant_id"] == 4  # not 2 again
+    assert names(repo, code) == ["Host", "Cy", "Bo"]
+    assert ids(repo, code) == [1, 3, 4]
+
+
+def test_someone_who_left_starts_over_with_no_items(service, repo):
+    code, tokens = build_group(service)
+    service.leave(tokens[1], code)
+    service.join(tokens[1], code, "Bo")
+
+    entry = service.get_summary(tokens[1], code)["participants"][-1]
+
+    assert entry["items"] == [] and entry["subtotal_cents"] == 0
+    service.add_item(tokens[1], code, 4, ITEM_Y, 2)  # and can add items under the new id
+    assert service.get_summary(tokens[1], code)["participants"][-1]["subtotal_cents"] == 2 * 1099
+
+
+def test_participant_ids_are_never_reused_even_when_the_last_person_leaves(service, repo):
+    code, tokens = build_group(service)
+    service.leave(tokens[2], code)  # participant 3, the last one
+
+    newcomer = service.join(new_user(service), code, "Di")
+
+    assert newcomer["participant_id"] == 4
+    assert ids(repo, code) == [1, 2, 4]
+
+
+def test_a_full_group_has_room_again_after_someone_leaves(service, repo):
+    code, tokens = build_group(service, guest_names=[f"G{n}" for n in range(2, 11)], with_items=False)
+    assert len(repo.get_group_order(code)["participants"]) == 10
+    assert_rejected("GROUP_FULL", service.join, new_user(service), code, "Eleven")
+
+    service.leave(tokens[4], code)
+    newcomer = service.join(new_user(service), code, "Eleven")
+
+    assert len(repo.get_group_order(code)["participants"]) == 10
+    assert newcomer["participant_id"] == 11
+
+
+def test_the_host_can_lock_once_the_person_without_items_has_left(service, repo):
+    code, tokens = build_group(service)
+    service.remove_item(tokens[2], code, 3, ITEM_X)  # Cy has no items now
+    assert_rejected("EMPTY_PARTICIPANT", service.lock, tokens[0], code)
+
+    service.leave(tokens[2], code)
+    service.lock(tokens[0], code)
+
+    assert repo.get_group_order(code)["status"] == "LOCKED"
+
+
+def test_a_group_of_only_the_host_is_fine(service, repo):
+    code, tokens = build_group(service, guest_names=("Bo",))
+    service.leave(tokens[1], code)
+
+    summary = service.get_summary(tokens[0], code)
+
+    assert [e["fee_share_cents"] for e in summary["participants"]] == [499]
+
+
+def test_a_rejected_leave_does_not_restart_the_countdown(service, repo, fake_clock):
+    code, tokens = build_group(service)
+    fake_clock.advance(timedelta(hours=1))
+    assert_rejected("HOST_CANNOT_LEAVE", service.leave, tokens[0], code)
+
+    fake_clock.advance(timedelta(hours=1))  # exactly 2:00:00 since the last real activity
+
+    assert_rejected("ORDER_EXPIRED", service.leave, tokens[1], code)
+
+
+def test_leaving_never_puts_a_token_in_a_response(service):
+    code, tokens = build_group(service)
+    service.leave(tokens[1], code)
+
+    text = json.dumps(service.get_summary(tokens[0], code))
+
+    assert tokens[1] not in text
+
+
+def test_simultaneous_leaves_all_succeed(service, repo):
+    code, tokens = build_group(service, guest_names=[f"G{n}" for n in range(2, 9)])
+    barrier = threading.Barrier(7)
+    errors = []
+
+    def go(token):
+        barrier.wait()
+        try:
+            service.leave(token, code)
+        except MiniDashError as error:
+            errors.append(error.code)
+
+    threads = [threading.Thread(target=go, args=(t,)) for t in tokens[1:]]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert errors == []
+    assert names(repo, code) == ["Host"]
+    assert len(repo.get_group_order(code)["removed_participants"]) == 7
+    assert_items_belong_to_members(repo, code)
+
+
+# ------------------------------------------------------------ the host removes a participant
+
+
+def test_the_host_can_remove_a_participant(service, repo):
+    code, tokens = build_group(service)
+
+    result = service.remove_participant(tokens[0], code, 2)
+
+    assert result is None
+    assert names(repo, code) == ["Host", "Cy"]
+    assert ids(repo, code) == [1, 3]
+
+
+def test_removing_a_participant_removes_all_of_their_items_and_only_theirs(service, repo):
+    code, tokens = build_group(service)
+    service.add_item(tokens[1], code, 2, ITEM_Y, 4)
+
+    service.remove_participant(tokens[0], code, 2)
+
+    items = repo.get_group_order(code)["items"]
+    assert [(i["participant_id"], i["menu_item_id"]) for i in items] == [(1, ITEM_X), (3, ITEM_X)]
+    assert_items_belong_to_members(repo, code)
+
+
+def test_removing_a_participant_changes_the_fee_shares(service):
+    code, tokens = build_group(service)
+
+    service.remove_participant(tokens[0], code, 3)
+
+    summary = service.get_summary(tokens[0], code)
+    assert [e["fee_share_cents"] for e in summary["participants"]] == [249, 250]
+
+
+def test_the_removal_is_recorded_as_a_kick(service, repo):
+    code, tokens = build_group(service)
+
+    service.remove_participant(tokens[0], code, 2)
+
+    removed = repo.get_group_order(code)["removed_participants"]
+    assert [(r["participant_id"], r["display_name"], r["reason"], r["token"]) for r in removed] == [
+        (2, "Bo", "KICKED", tokens[1])
+    ]
+
+
+def test_the_data_file_remembers_who_was_removed(service, data_file):
+    code, tokens = build_group(service)
+
+    service.remove_participant(tokens[0], code, 2)
+
+    stored = read_file(data_file)["group_orders"][code]["removed_participants"]
+    assert [(r["token"], r["reason"]) for r in stored] == [(tokens[1], "KICKED")]
+
+
+def test_removing_counts_as_activity(service, repo, fake_clock):
+    code, tokens = build_group(service)
+    fake_clock.advance(timedelta(hours=1))
+
+    service.remove_participant(tokens[0], code, 2)
+
+    assert repo.get_group_order(code)["last_activity_at"] == fake_clock.now().isoformat()
+
+
+def test_only_the_host_can_remove_people(service, repo, fake_clock):
+    code, tokens = build_group(service)
+    fake_clock.advance(timedelta(minutes=10))
+    before = repo.get_group_order(code)
+
+    assert_rejected("NOT_HOST", service.remove_participant, tokens[1], code, 3)  # a guest removing a guest
+    assert_rejected("NOT_HOST", service.remove_participant, tokens[1], code, 1)  # a guest removing the host
+    assert_rejected("NOT_HOST", service.remove_participant, tokens[2], code, 2)
+    assert_rejected("NOT_HOST", service.remove_participant, new_user(service), code, 2)  # someone outside
+
+    assert repo.get_group_order(code) == before
+
+
+def test_the_host_cannot_be_removed_not_even_by_themselves(service, repo):
+    code, tokens = build_group(service)
+    before = repo.get_group_order(code)
+
+    assert_rejected("HOST_CANNOT_LEAVE", service.remove_participant, tokens[0], code, 1)
+
+    assert repo.get_group_order(code) == before
+
+
+def test_removing_someone_who_is_not_in_the_group_gives_participant_not_found(service, repo):
+    code, tokens = build_group(service)
+    before = repo.get_group_order(code)
+
+    assert_rejected("PARTICIPANT_NOT_FOUND", service.remove_participant, tokens[0], code, 99)
+
+    assert repo.get_group_order(code) == before
+
+
+def test_removing_the_same_person_twice_the_second_time_is_not_found(service, repo):
+    code, tokens = build_group(service)
+    service.remove_participant(tokens[0], code, 2)
+
+    assert_rejected("PARTICIPANT_NOT_FOUND", service.remove_participant, tokens[0], code, 2)
+
+    assert len(repo.get_group_order(code)["removed_participants"]) == 1
+
+
+def test_removing_someone_who_already_left_is_not_found(service):
+    code, tokens = build_group(service)
+    service.leave(tokens[1], code)
+
+    assert_rejected("PARTICIPANT_NOT_FOUND", service.remove_participant, tokens[0], code, 2)
+
+
+@pytest.mark.parametrize("token", [None, "", "never-issued"])
+def test_remove_participant_needs_a_valid_session(service, repo, token):
+    code, _ = build_group(service)
+
+    assert_rejected("INVALID_SESSION", service.remove_participant, token, code, 2)
+
+    assert len(repo.get_group_order(code)["participants"]) == 3
+
+
+def test_remove_participant_with_a_wrong_code_gives_invalid_code(service):
+    _, tokens = build_group(service)
+
+    assert_rejected("INVALID_CODE", service.remove_participant, tokens[0], "nope42", 2)
+
+
+def test_removing_is_rejected_once_the_order_is_locked_or_checked_out(service, repo):
+    code, tokens = build_group(service)
+    service.lock(tokens[0], code)
+    assert_rejected("ORDER_LOCKED", service.remove_participant, tokens[0], code, 2)
+
+    set_status(repo, code, "CHECKED_OUT")
+    assert_rejected("ORDER_CHECKED_OUT", service.remove_participant, tokens[0], code, 2)
+
+    assert len(repo.get_group_order(code)["participants"]) == 3
+
+
+def test_removing_at_exactly_2_hours_gives_order_expired_and_saves_expired(service, repo, fake_clock):
+    code, tokens = build_group(service)
+    before = repo.get_group_order(code)
+    fake_clock.advance(TWO_HOURS)
+
+    assert_rejected("ORDER_EXPIRED", service.remove_participant, tokens[0], code, 2)
+
+    assert repo.get_group_order(code) == {**before, "status": "EXPIRED"}
+
+
+def test_the_checks_for_removing_run_in_order(service):
+    code, tokens = build_group(service)
+
+    assert_rejected("NOT_HOST", service.remove_participant, tokens[1], code, 99)  # NOT_HOST before NOT_FOUND
+    assert_rejected("PARTICIPANT_NOT_FOUND", service.remove_participant, tokens[0], code, 99)
+    service.lock(tokens[0], code)
+    assert_rejected("ORDER_LOCKED", service.remove_participant, tokens[1], code, 99)  # status before NOT_HOST
+
+
+def test_a_rejected_removal_does_not_restart_the_countdown(service, fake_clock):
+    code, tokens = build_group(service)
+    fake_clock.advance(timedelta(hours=1))
+    assert_rejected("NOT_HOST", service.remove_participant, tokens[1], code, 3)
+    assert_rejected("PARTICIPANT_NOT_FOUND", service.remove_participant, tokens[0], code, 99)
+
+    fake_clock.advance(timedelta(hours=1))
+
+    assert_rejected("ORDER_EXPIRED", service.remove_participant, tokens[0], code, 2)
+
+
+def test_the_host_can_lock_after_removing_someone_with_no_items(service, repo):
+    code, tokens = build_group(service)
+    service.remove_item(tokens[2], code, 3, ITEM_X)
+    assert_rejected("EMPTY_PARTICIPANT", service.lock, tokens[0], code)
+
+    service.remove_participant(tokens[0], code, 3)
+    service.lock(tokens[0], code)
+
+    assert repo.get_group_order(code)["status"] == "LOCKED"
+
+
+# -------------------------------------------------- a removed person stays out
+
+
+def test_a_removed_person_cannot_join_again(service, repo):
+    code, tokens = build_group(service)
+    service.remove_participant(tokens[0], code, 2)
+    before = repo.get_group_order(code)
+
+    assert_rejected("REMOVED_FROM_GROUP", service.join, tokens[1], code, "Bo")
+    assert_rejected("REMOVED_FROM_GROUP", service.join, tokens[1], code, "Bo with a new name")
+
+    assert repo.get_group_order(code) == before
+
+
+def test_a_removed_person_cannot_join_even_when_the_group_has_plenty_of_room(service, repo):
+    code, tokens = build_group(service, guest_names=("Bo",))
+    service.remove_participant(tokens[0], code, 2)
+
+    assert_rejected("REMOVED_FROM_GROUP", service.join, tokens[1], code, "Bo")
+
+    assert names(repo, code) == ["Host"]
+
+
+def test_the_ban_follows_the_session_not_the_name(service):
+    code, tokens = build_group(service)
+    service.remove_participant(tokens[0], code, 2)
+
+    other = service.join(new_user(service), code, "Bo")  # same name, different session
+
+    assert other["display_name"] == "Bo"
+
+
+def test_a_removed_person_is_told_so_when_they_ask_for_the_summary_or_change_items(service):
+    code, tokens = build_group(service)
+    service.remove_participant(tokens[0], code, 2)
+
+    assert_rejected("REMOVED_FROM_GROUP", service.get_summary, tokens[1], code)
+    assert_rejected("REMOVED_FROM_GROUP", service.add_item, tokens[1], code, 2, ITEM_Y, 1)
+    assert_rejected("REMOVED_FROM_GROUP", service.change_item, tokens[1], code, 2, ITEM_X, 2)
+    assert_rejected("REMOVED_FROM_GROUP", service.remove_item, tokens[1], code, 2, ITEM_X)
+
+
+def test_a_removed_person_is_not_told_the_same_thing_as_someone_who_left(service):
+    code, tokens = build_group(service)
+    service.remove_participant(tokens[0], code, 2)
+    service.leave(tokens[2], code)
+
+    assert_rejected("REMOVED_FROM_GROUP", service.get_summary, tokens[1], code)
+    assert_rejected("NOT_ALLOWED", service.get_summary, tokens[2], code)
+
+
+def test_a_removed_person_cannot_leave_or_remove_others(service):
+    code, tokens = build_group(service)
+    service.remove_participant(tokens[0], code, 2)
+
+    assert_rejected("REMOVED_FROM_GROUP", service.leave, tokens[1], code)
+    assert_rejected("NOT_HOST", service.remove_participant, tokens[1], code, 3)
+    assert_rejected("NOT_HOST", service.lock, tokens[1], code)
+
+
+def test_a_person_who_left_and_rejoined_can_still_be_removed_for_good(service):
+    code, tokens = build_group(service)
+    service.leave(tokens[1], code)
+    rejoined = service.join(tokens[1], code, "Bo")
+
+    service.remove_participant(tokens[0], code, rejoined["participant_id"])
+
+    assert_rejected("REMOVED_FROM_GROUP", service.join, tokens[1], code, "Bo")
+
+
+def test_the_ban_is_only_for_that_group(service):
+    code, tokens = build_group(service)
+    service.remove_participant(tokens[0], code, 2)
+    other_host, other_code = new_group(service, name="Other host")
+
+    service.join(tokens[1], other_code, "Bo")  # the same session joins a different group
+
+    assert other_code != code
+
+
+def test_the_ban_is_checked_after_the_group_status(service, repo):
+    code, tokens = build_group(service)
+    service.remove_participant(tokens[0], code, 2)
+    service.lock(tokens[0], code)
+
+    assert_rejected("ORDER_LOCKED", service.join, tokens[1], code, "Bo")
+
+
+def test_removing_a_participant_never_leaves_items_behind_even_when_they_add_at_the_same_moment(service, repo):
+    for round_number in range(30):
+        code, tokens = build_group(service, guest_names=("Bo",))
+        jobs = [
+            lambda: service.remove_participant(tokens[0], code, 2),
+            lambda: service.add_item(tokens[1], code, 2, ITEM_Y, 3),
+        ]
+        if round_number % 2:
+            jobs.reverse()
+        barrier = threading.Barrier(2)
+
+        def go(job):
+            barrier.wait()
+            try:
+                job()
+            except MiniDashError:
+                pass
+
+        threads = [threading.Thread(target=go, args=(job,)) for job in jobs]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+
+        assert_items_belong_to_members(repo, code)
+        assert names(repo, code) == ["Host"]
+
+
+def test_a_removal_and_a_join_at_the_same_moment_keep_ids_unique(service, repo):
+    code, tokens = build_group(service, guest_names=("Bo", "Cy"))
+    newcomers = [new_user(service) for _ in range(4)]
+    barrier = threading.Barrier(5)
+
+    def kick():
+        barrier.wait()
+        service.remove_participant(tokens[0], code, 3)
+
+    def join(token, name):
+        barrier.wait()
+        service.join(token, code, name)
+
+    threads = [threading.Thread(target=kick)] + [
+        threading.Thread(target=join, args=(t, f"N{i}")) for i, t in enumerate(newcomers)
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    all_ids = ids(repo, code) + [r["participant_id"] for r in repo.get_group_order(code)["removed_participants"]]
+    assert len(all_ids) == len(set(all_ids))

@@ -858,3 +858,92 @@ def test_the_group_total_in_the_summary_matches_the_order_total(service, orders)
 
     group_total = sum(entry["total_cents"] for entry in summary["participants"])
     assert group_total == orders.get_order(summary["order_id"])["total_cents"]
+
+
+# ====================================== a restaurant that is open 24 hours a day (the diner)
+
+DINER = 4  # Starlight Diner, "00:00" to "24:00"
+DINER_A, DINER_B, DINER_C = 13, 14, 15
+
+
+def next_day(hour: int, minute: int = 0, second: int = 0) -> datetime:
+    return datetime(2001, 1, 2, hour, minute, second, tzinfo=timezone.utc)
+
+
+@pytest.mark.parametrize(
+    "when",
+    [at(0, 0, 0), at(0, 0, 1), at(3, 30, 0), at(11, 59, 59), at(12, 0, 0), at(21, 30, 0), at(23, 0, 0), at(23, 59, 59)],
+    ids=lambda t: t.strftime("%H:%M:%S"),
+)
+def test_the_diner_can_be_checked_out_at_any_time_of_day(service, repo, fake_clock, data_file, when):
+    fake_clock.set(when)
+    code, tokens = make_locked(service, [[(DINER_A, 2)], [(DINER_B, 1)]], restaurant=DINER)
+
+    result = service.checkout(tokens[0], code, ADDRESS)
+
+    assert repo.get_group_order(code)["status"] == "CHECKED_OUT"
+    assert len(orders_in_file(data_file)) == 1 and result["order_id"] == 1
+
+
+def test_a_checkout_just_after_midnight_works_for_a_group_locked_just_before_it(service, repo, fake_clock):
+    fake_clock.set(at(23, 59, 59))
+    code, tokens = make_locked(service, [[(DINER_A, 1)]], restaurant=DINER)
+    fake_clock.set(next_day(0, 0, 1))  # two seconds later, the next day
+
+    service.checkout(tokens[0], code, ADDRESS)
+
+    assert repo.get_group_order(code)["status"] == "CHECKED_OUT"
+
+
+def test_the_diner_total_is_the_menu_prices_plus_the_fee(service, orders, fake_clock):
+    fake_clock.set(at(3, 0, 0))
+    code, tokens = make_locked(service, [[(DINER_A, 2)], [(DINER_C, 1)]], restaurant=DINER)
+
+    order_id = service.checkout(tokens[0], code, ADDRESS)["order_id"]
+
+    order = orders.get_order(order_id)
+    assert order["restaurant_id"] == DINER
+    assert order["total_cents"] == 2 * 1099 + 1049 + 499
+
+
+def test_a_normal_restaurant_is_still_closed_in_the_middle_of_the_night(service, fake_clock):
+    fake_clock.set(at(3, 0, 0))
+    code, tokens = make_locked(service)  # restaurant 2 opens at 12:00
+
+    assert_rejected("RESTAURANT_CLOSED", service.checkout, tokens[0], code, ADDRESS)
+
+
+@pytest.mark.parametrize(("opens", "closes"), [("00:00", "24:00"), ("00:00", "23:59")])
+def test_all_day_hours_can_be_set_on_any_restaurant_with_00_00_to_24_00(service, fake_clock, data_file, opens, closes):
+    data = json.loads(data_file.read_text())
+    data["restaurants"][1]["opens_at"], data["restaurants"][1]["closes_at"] = opens, closes  # restaurant 2
+    data_file.write_text(json.dumps(data))
+    fake_clock.set(at(23, 59, 30))
+    code, tokens = make_locked(service)
+
+    if closes == "24:00":
+        service.checkout(tokens[0], code, ADDRESS)  # open until the very end of the day
+    else:
+        assert_rejected("RESTAURANT_CLOSED", service.checkout, tokens[0], code, ADDRESS)  # 23:59 closes a minute early
+
+
+def test_a_closing_time_of_24_00_does_not_change_how_other_hours_end(service, fake_clock, data_file):
+    data = json.loads(data_file.read_text())
+    data["restaurants"][1]["opens_at"], data["restaurants"][1]["closes_at"] = "18:00", "24:00"  # evenings only
+    data_file.write_text(json.dumps(data))
+    fake_clock.set(at(17, 59, 59))
+    code, tokens = make_locked(service)
+    assert_rejected("RESTAURANT_CLOSED", service.checkout, tokens[0], code, ADDRESS)  # not open yet
+
+    fake_clock.set(at(18, 0, 0))
+    service.checkout(tokens[0], code, ADDRESS)  # open from 18:00 to the end of the day
+
+
+def test_the_hours_are_still_compared_in_utc_for_the_diner(service, repo, fake_clock):
+    plus_5 = timezone(timedelta(hours=5))
+    fake_clock.set(datetime(2001, 1, 1, 4, 0, tzinfo=plus_5))  # 23:00 UTC the day before
+    code, tokens = make_locked(service, [[(DINER_A, 1)]], restaurant=DINER)
+
+    service.checkout(tokens[0], code, ADDRESS)
+
+    assert repo.get_group_order(code)["status"] == "CHECKED_OUT"

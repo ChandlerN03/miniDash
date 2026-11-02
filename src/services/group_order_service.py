@@ -1,7 +1,7 @@
 import copy
 import secrets
 import uuid
-from datetime import datetime, time, timedelta, timezone
+from datetime import datetime, timedelta, timezone
 
 from src.clock import Clock
 from src.repository.group_orders_repo import (
@@ -113,7 +113,7 @@ class GroupOrderService:
                 return rejection, None  # returned, not raised, so a saved EXPIRED survives
 
             participant = {
-                "participant_id": max((p["participant_id"] for p in group["participants"]), default=0) + 1,
+                "participant_id": _next_participant_id(group),
                 "token": token,
                 "display_name": display_name,
                 "joined_at": now,
@@ -206,6 +206,8 @@ class GroupOrderService:
                 raise MiniDashError(errors.INVALID_CODE, "No group order matches this code.") from None
 
         if not any(p["token"] == token for p in group["participants"]):
+            if _was_removed_by_host(group, token):
+                raise MiniDashError(errors.REMOVED_FROM_GROUP, "The host removed you from this group order.")
             raise MiniDashError(errors.NOT_ALLOWED, "Only participants can see the summary.")
         return self._build_summary(group, token)
 
@@ -351,11 +353,67 @@ class GroupOrderService:
         """Open from opens_at up to, but not including, closes_at, in UTC.
 
         The hours are "HH:MM" strings without a timezone, so they are compared with
-        the injected clock's time in UTC. Hours that run past midnight (closes_at not
-        after opens_at) are not supported and count as always closed.
+        the injected clock's time in UTC. "24:00" means the end of the day, so a
+        restaurant that is always open is "00:00" to "24:00". Hours that run past
+        midnight (closes_at not after opens_at) are not supported and count as
+        always closed.
         """
-        now = self._clock.now().astimezone(timezone.utc).time()
-        return time.fromisoformat(restaurant["opens_at"]) <= now < time.fromisoformat(restaurant["closes_at"])
+        now = self._clock.now().astimezone(timezone.utc)
+        seconds_today = now.hour * 3600 + now.minute * 60 + now.second
+        return _seconds_into_day(restaurant["opens_at"]) <= seconds_today < _seconds_into_day(restaurant["closes_at"])
+
+    # ------------------------------------------------- leave / remove a person (R19)
+
+    def leave(self, token: str | None, code: str) -> None:
+        """A participant leaves the group order. Their items go with them.
+
+        Only while the order is OPEN, and the host cannot leave. Someone who left can join
+        again later, as a new participant. Counts as activity (R30).
+        """
+        self._require_session(token)
+
+        def attempt(group: dict) -> tuple[MiniDashError | None, None]:
+            now = self._now()
+            self._expire_if_inactive(group)  # R31, may change group["status"]
+            rejection = self._status_rejection(group)
+            if rejection is not None:
+                return rejection, None  # returned, not raised, so a saved EXPIRED survives
+            me = next((p for p in group["participants"] if p["token"] == token), None)
+            if me is None:
+                if _was_removed_by_host(group, token):
+                    return MiniDashError(errors.REMOVED_FROM_GROUP, "The host removed you from this group order."), None
+                return MiniDashError(errors.NOT_ALLOWED, "You are not part of this group order."), None
+            if token == group["host_token"]:
+                return MiniDashError(errors.HOST_CANNOT_LEAVE, "The host cannot leave their own group order."), None
+            _drop_participant(group, me, "LEFT", now)
+            return None, None
+
+        self._update_group(code, attempt)
+
+    def remove_participant(self, token: str | None, code: str, participant_id: int) -> None:
+        """The host removes a participant and all their items (R19). They can never join this group again.
+
+        Only while the order is OPEN, and the host cannot be removed. Counts as activity (R30).
+        """
+        self._require_session(token)
+
+        def attempt(group: dict) -> tuple[MiniDashError | None, None]:
+            now = self._now()
+            self._expire_if_inactive(group)  # R31, may change group["status"]
+            rejection = self._status_rejection(group)
+            if rejection is not None:
+                return rejection, None
+            if token != group["host_token"]:  # R27
+                return MiniDashError(errors.NOT_HOST, "Only the host can remove people from the group order."), None
+            target = next((p for p in group["participants"] if p["participant_id"] == participant_id), None)
+            if target is None:
+                return MiniDashError(errors.PARTICIPANT_NOT_FOUND, "That person is not in this group order."), None
+            if target["token"] == group["host_token"]:
+                return MiniDashError(errors.HOST_CANNOT_LEAVE, "The host cannot be removed from their own group order."), None
+            _drop_participant(group, target, "KICKED", now)
+            return None, None
+
+        self._update_group(code, attempt)
 
     # ------------------------------------------------------------------ helpers
 
@@ -400,11 +458,13 @@ class GroupOrderService:
 
     def _join_rejection(self, group: dict, token: str) -> MiniDashError | None:
         """The error a join must be rejected with, or None. Checked in the order
-        ORDER_EXPIRED, ORDER_CHECKED_OUT, ORDER_LOCKED, ALREADY_JOINED, GROUP_FULL.
+        ORDER_EXPIRED, ORDER_CHECKED_OUT, ORDER_LOCKED, REMOVED_FROM_GROUP, ALREADY_JOINED, GROUP_FULL.
         """
         rejection = self._status_rejection(group)
         if rejection is not None:
             return rejection
+        if _was_removed_by_host(group, token):
+            return MiniDashError(errors.REMOVED_FROM_GROUP, "The host removed you from this group order.")
         if any(p["token"] == token for p in group["participants"]):
             return MiniDashError(errors.ALREADY_JOINED, "You have already joined this group order.")
         if len(group["participants"]) >= MAX_PARTICIPANTS:
@@ -437,6 +497,8 @@ class GroupOrderService:
         is_own_item = owner is not None and owner["token"] == token
         host_removing = action == "remove" and owner is not None and token == group["host_token"]
         if not (is_own_item or host_removing):
+            if _was_removed_by_host(group, token):
+                return MiniDashError(errors.REMOVED_FROM_GROUP, "The host removed you from this group order.")
             return MiniDashError(
                 errors.NOT_ALLOWED,
                 "You can only change your own items. Only the host can remove other people's items.",
@@ -492,6 +554,39 @@ class GroupOrderService:
         timer = ActivityTimer(_FixedClock(last_activity), self._ttl)
         timer.clock = self._clock
         return timer.is_expired()
+
+
+def _seconds_into_day(hhmm: str) -> int:
+    """"HH:MM" as seconds since midnight. Unlike datetime.time this accepts "24:00" (the end of the day)."""
+    hours, minutes = hhmm.split(":")
+    return int(hours) * 3600 + int(minutes) * 60
+
+
+def _next_participant_id(group: dict) -> int:
+    """One more than every id ever used in this group, including people who left or were removed."""
+    used = [p["participant_id"] for p in group["participants"]]
+    used += [r["participant_id"] for r in group.get("removed_participants", [])]
+    return max(used, default=0) + 1
+
+
+def _was_removed_by_host(group: dict, token: str) -> bool:
+    return any(r["token"] == token and r["reason"] == "KICKED" for r in group.get("removed_participants", []))
+
+
+def _drop_participant(group: dict, participant: dict, reason: str, now: str) -> None:
+    """Take a participant and all their items out of the group, and remember why (LEFT or KICKED)."""
+    group["participants"].remove(participant)
+    group["items"][:] = [i for i in group["items"] if i["participant_id"] != participant["participant_id"]]
+    group.setdefault("removed_participants", []).append(
+        {
+            "participant_id": participant["participant_id"],
+            "token": participant["token"],
+            "display_name": participant["display_name"],
+            "reason": reason,
+            "removed_at": now,
+        }
+    )
+    group["last_activity_at"] = now  # leaving and removing count as activity (R30)
 
 
 def _is_whole_number(value: object) -> bool:
